@@ -497,6 +497,33 @@ app.post(
   }),
 );
 
+// ✅ NEW: Bulk image upload (multiple images in one request)
+app.post(
+  "/api/uploads/images",
+  admin,
+  wrap(async (req, res) => {
+    const images = req.body.images;
+
+    if (!Array.isArray(images) || images.length === 0) {
+      return res.status(400).json({
+        message: "Images array is required.",
+      });
+    }
+
+    if (images.length > 10) {
+      return res.status(400).json({
+        message: "Maximum 10 images per request.",
+      });
+    }
+
+    const imageUrls = await Promise.all(
+      images.map((imageData) => imgBB(imageData)),
+    );
+
+    res.status(201).json({ imageUrls });
+  }),
+);
+
 app.post(
   "/api/public/payment-proof",
   wrap(async (req, res) => {
@@ -558,6 +585,92 @@ app.post(
     });
 
     res.status(201).json(product);
+  }),
+);
+
+// ✅ NEW: Admin product update (edit) route
+app.patch(
+  "/api/admin/products/:id",
+  admin,
+  wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid product ID.",
+      });
+    }
+
+    const allowedFields = [
+      "title",
+      "description",
+      "price",
+      "compareAtPrice",
+      "category",
+      "images",
+      "sizes",
+      "colors",
+      "stock",
+      "sku",
+      "material",
+      "gsm",
+      "tags",
+      "active",
+    ];
+
+    const update = {};
+
+    for (const field of allowedFields) {
+      if (req.body[field] === undefined) continue;
+
+      if (
+        field === "price" ||
+        field === "compareAtPrice" ||
+        field === "stock"
+      ) {
+        const num = Number(req.body[field]);
+        if (!Number.isFinite(num)) {
+          return res.status(400).json({
+            message: `Invalid value for ${field}.`,
+          });
+        }
+        update[field] = field === "stock" ? Math.max(0, num) : num;
+      } else if (
+        field === "images" ||
+        field === "sizes" ||
+        field === "colors" ||
+        field === "tags"
+      ) {
+        update[field] = Array.isArray(req.body[field]) ? req.body[field] : [];
+      } else if (field === "active") {
+        update[field] = Boolean(req.body[field]);
+      } else {
+        update[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({
+        message: "No valid product fields provided.",
+      });
+    }
+
+    // Title change hole slug-o update kore dei
+    if (update.title?.trim()) {
+      update.title = update.title.trim();
+      update.slug = `${slugify(update.title)}-${Date.now().toString(36)}`;
+    }
+
+    const product = await Product.findByIdAndUpdate(req.params.id, update, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!product) {
+      return res.status(404).json({
+        message: "Product not found.",
+      });
+    }
+
+    res.json(product);
   }),
 );
 
