@@ -10,21 +10,22 @@ import { tokenFor, auth, admin, slugify, imgBB, telegram } from "./helpers.js";
 import { seedDemoData } from "./seed.js";
 
 const app = express();
-const port = Number(process.env.PORT) || 5000;
 
 // --------------------
 // Basic configuration
 // --------------------
 
-const allowedOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:5173")
+const allowedOrigins = (
+  process.env.CLIENT_ORIGIN || "https://takeiteasybd.vercel.app"
+)
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin || allowedOrigins.includes(origin.replace(/\/+$/, ""))) {
         return callback(null, true);
       }
 
@@ -37,7 +38,66 @@ app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
 // --------------------
-// Root and URL compatibility
+// MongoDB connection
+// --------------------
+
+let connectionPromise = null;
+let seedPromise = null;
+
+async function connectDatabase() {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+
+  if (mongoose.connection.readyState === 2 && connectionPromise) {
+    await connectionPromise;
+    return;
+  }
+
+  if (!process.env.MONGODB_URI) {
+    throw new Error("MONGODB_URI environment variable is missing.");
+  }
+
+  if (!connectionPromise) {
+    connectionPromise = mongoose
+      .connect(process.env.MONGODB_URI)
+      .then(() => {
+        console.log("MongoDB connected.");
+      })
+      .catch((error) => {
+        connectionPromise = null;
+        throw error;
+      });
+  }
+
+  await connectionPromise;
+}
+
+async function initializeDatabase() {
+  await connectDatabase();
+
+  if (!seedPromise) {
+    seedPromise = Promise.resolve()
+      .then(() => seedDemoData())
+      .catch((error) => {
+        seedPromise = null;
+        throw error;
+      });
+  }
+
+  await seedPromise;
+}
+
+// All API requests initialize the database before reaching routes.
+// CORS middleware runs first so browser preflight requests can be handled.
+app.use((req, res, next) => {
+  initializeDatabase()
+    .then(() => next())
+    .catch(next);
+});
+
+// --------------------
+// Root and health check
 // --------------------
 
 app.get("/", (_req, res) => {
@@ -48,14 +108,29 @@ app.get("/", (_req, res) => {
       health: "/api/health",
       products: "/api/products",
       banners: "/api/banners",
+      orders: "/api/orders",
     },
   });
 });
 
-/*
- * The actual API routes below use /api prefixes.
- * Older frontend requests such as /products are also supported.
- */
+app.get("/api", (_req, res) => {
+  res.json({
+    name: "Take It Easy API",
+    status: "running",
+  });
+});
+
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    database:
+      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+  });
+});
+
+// --------------------
+// Legacy URL compatibility
+// --------------------
 
 app.use((req, _res, next) => {
   const path = req.path;
@@ -85,18 +160,6 @@ const clean = (user) => ({
   name: user.name,
   email: user.email,
   phone: user.phone,
-});
-
-// --------------------
-// Health check
-// --------------------
-
-app.get("/api/health", (_req, res) => {
-  res.json({
-    ok: true,
-    database:
-      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-  });
 });
 
 // --------------------
@@ -315,9 +378,7 @@ app.get(
     const conditions = [{ slug: req.params.slug }];
 
     if (mongoose.isValidObjectId(req.params.slug)) {
-      conditions.push({
-        _id: req.params.slug,
-      });
+      conditions.push({ _id: req.params.slug });
     }
 
     const product = await Product.findOne({
@@ -747,7 +808,7 @@ app.post(
     });
 
     // --------------------
-    // Professional Telegram Order Notification
+    // Telegram notification
     // --------------------
 
     const formatMoney = (amount) =>
@@ -822,10 +883,12 @@ app.post(
       "Please review and process this order.",
     ].join("\n");
 
-    // Telegram failure should not cancel a valid order.
-    await telegram(notification).catch((error) => {
+    // Telegram failure must not cancel a valid order.
+    try {
+      await telegram(notification);
+    } catch (error) {
       console.error("Telegram notification failed:", error.message);
-    });
+    }
 
     res.status(201).json({
       orderNumber,
@@ -992,40 +1055,7 @@ app.use((error, _req, res, _next) => {
 });
 
 // --------------------
-// Start server
+// Vercel Serverless export
 // --------------------
 
-async function startServer() {
-  if (!process.env.MONGODB_URI) {
-    throw new Error("MONGODB_URI is missing from server/.env");
-  }
-
-  await mongoose.connect(process.env.MONGODB_URI);
-
-  console.log("MongoDB connected.");
-
-  await seedDemoData();
-
-  const server = app.listen(port, () => {
-    console.log(`Take It Easy API listening at http://localhost:${port}`);
-    console.log(`Products: http://localhost:${port}/api/products`);
-    console.log(`Banners: http://localhost:${port}/api/banners`);
-  });
-
-  server.on("error", (error) => {
-    if (error.code === "EADDRINUSE") {
-      console.error(
-        `Port ${port} is already in use. Stop the other server or change PORT in server/.env.`,
-      );
-    } else {
-      console.error("Server error:", error);
-    }
-
-    process.exitCode = 1;
-  });
-}
-
-startServer().catch((error) => {
-  console.error("Server startup failed:", error.message);
-  process.exit(1);
-});
+export default app;
