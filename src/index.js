@@ -1,0 +1,1031 @@
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+
+import { User, Product, Review, Order, Banner } from "./models.js";
+import { tokenFor, auth, admin, slugify, imgBB, telegram } from "./helpers.js";
+import { seedDemoData } from "./seed.js";
+
+const app = express();
+const port = Number(process.env.PORT) || 5000;
+
+// --------------------
+// Basic configuration
+// --------------------
+
+const allowedOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Origin not allowed by CORS."));
+    },
+  }),
+);
+
+app.use(express.json({ limit: "8mb" }));
+app.use(express.urlencoded({ extended: true, limit: "8mb" }));
+
+// --------------------
+// Root and URL compatibility
+// --------------------
+
+app.get("/", (_req, res) => {
+  res.json({
+    name: "Take It Easy API",
+    status: "running",
+    endpoints: {
+      health: "/api/health",
+      products: "/api/products",
+      banners: "/api/banners",
+    },
+  });
+});
+
+/*
+ * The actual API routes below use /api prefixes.
+ * Older frontend requests such as /products are also supported.
+ */
+
+app.use((req, _res, next) => {
+  const path = req.path;
+
+  if (
+    path === "/" ||
+    path === "/api" ||
+    path.startsWith("/api/") ||
+    path.startsWith("/.well-known/")
+  ) {
+    return next();
+  }
+
+  req.url = `/api${req.url}`;
+  next();
+});
+
+// --------------------
+// Helpers
+// --------------------
+
+const wrap = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next);
+
+const clean = (user) => ({
+  id: user._id,
+  name: user.name,
+  email: user.email,
+  phone: user.phone,
+});
+
+// --------------------
+// Health check
+// --------------------
+
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    database:
+      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+  });
+});
+
+// --------------------
+// Customer authentication
+// --------------------
+
+app.post(
+  "/api/auth/register",
+  wrap(async (req, res) => {
+    const { name, email, password, phone = "" } = req.body;
+
+    if (!name?.trim() || !email?.trim() || !password || password.length < 8) {
+      return res.status(400).json({
+        message: "Name, email and password (8+ characters) required.",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const existingUser = await User.findOne({
+      email: normalizedEmail,
+    });
+
+    if (existingUser) {
+      return res.status(409).json({
+        message: "Email already registered.",
+      });
+    }
+
+    const user = await User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      phone: String(phone).trim(),
+      passwordHash: await bcrypt.hash(password, 12),
+    });
+
+    res.status(201).json({
+      token: tokenFor(user),
+      user: clean(user),
+    });
+  }),
+);
+
+app.post(
+  "/api/auth/login",
+  wrap(async (req, res) => {
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
+
+    const user = await User.findOne({ email });
+
+    if (
+      !user ||
+      !(await bcrypt.compare(req.body.password || "", user.passwordHash))
+    ) {
+      return res.status(401).json({
+        message: "Email or password incorrect.",
+      });
+    }
+
+    res.json({
+      token: tokenFor(user),
+      user: clean(user),
+    });
+  }),
+);
+
+app.get(
+  "/api/auth/me",
+  auth,
+  wrap(async (req, res) => {
+    const user = await User.findById(req.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found.",
+      });
+    }
+
+    res.json({ user: clean(user) });
+  }),
+);
+
+app.patch(
+  "/api/auth/profile",
+  auth,
+  wrap(async (req, res) => {
+    const { name, email, phone = "" } = req.body;
+
+    if (!name?.trim() || !email?.trim()) {
+      return res.status(400).json({
+        message: "Name and email required.",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const existingUser = await User.findOne({
+      email: normalizedEmail,
+      _id: { $ne: req.userId },
+    });
+
+    if (existingUser) {
+      return res.status(409).json({
+        message: "Email already in use.",
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.userId,
+      {
+        name: name.trim(),
+        email: normalizedEmail,
+        phone: String(phone).trim(),
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found.",
+      });
+    }
+
+    res.json({ user: clean(user) });
+  }),
+);
+
+// --------------------
+// Admin authentication
+// --------------------
+
+app.post(
+  "/api/admin/login",
+  wrap(async (req, res) => {
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
+
+    const adminEmail = String(process.env.ADMIN_EMAIL || "")
+      .trim()
+      .toLowerCase();
+
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    const jwtSecret = process.env.JWT_SECRET;
+
+    if (!adminEmail || !adminPassword || !jwtSecret) {
+      console.error("Admin login environment variables are missing.");
+
+      return res.status(500).json({
+        message: "Admin login is not configured.",
+      });
+    }
+
+    if (email !== adminEmail || req.body.password !== adminPassword) {
+      return res.status(401).json({
+        message: "Invalid admin credentials.",
+      });
+    }
+
+    const token = jwt.sign({ role: "admin" }, jwtSecret, { expiresIn: "12h" });
+
+    res.json({ token });
+  }),
+);
+
+// --------------------
+// Public products
+// --------------------
+
+app.get(
+  "/api/products",
+  wrap(async (req, res) => {
+    const filter = { active: true };
+    const query = String(req.query.q || "").trim();
+
+    if (query) {
+      const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+      filter.$or = [
+        {
+          title: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
+        {
+          description: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    if (req.query.category && req.query.category !== "All") {
+      filter.category = String(req.query.category);
+    }
+
+    const products = await Product.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(300)
+      .lean();
+
+    res.json(products);
+  }),
+);
+
+app.get(
+  "/api/products/:slug",
+  wrap(async (req, res) => {
+    const conditions = [{ slug: req.params.slug }];
+
+    if (mongoose.isValidObjectId(req.params.slug)) {
+      conditions.push({
+        _id: req.params.slug,
+      });
+    }
+
+    const product = await Product.findOne({
+      $or: conditions,
+      active: true,
+    }).lean();
+
+    if (!product) {
+      return res.status(404).json({
+        message: "Product not found.",
+      });
+    }
+
+    const reviews = await Review.find({
+      product: product._id,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({
+      product,
+      reviews,
+    });
+  }),
+);
+
+// --------------------
+// Product reviews
+// --------------------
+
+app.post(
+  "/api/products/:id/reviews",
+  auth,
+  wrap(async (req, res) => {
+    const rating = Number(req.body.rating);
+    const comment = String(req.body.comment || "").trim();
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5 || !comment) {
+      return res.status(400).json({
+        message: "Rating and review required.",
+      });
+    }
+
+    const [product, user] = await Promise.all([
+      Product.findById(req.params.id),
+      User.findById(req.userId),
+    ]);
+
+    if (!product || !user) {
+      return res.status(404).json({
+        message: "Please login and Order first to review this product.",
+      });
+    }
+
+    const review = await Review.findOneAndUpdate(
+      {
+        product: product._id,
+        user: user._id,
+      },
+      {
+        product: product._id,
+        user: user._id,
+        userName: user.name,
+        rating,
+        comment,
+      },
+      {
+        upsert: true,
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+      },
+    );
+
+    res.status(201).json(review);
+  }),
+);
+
+// --------------------
+// Public banners
+// --------------------
+
+app.get(
+  "/api/banners",
+  wrap(async (_req, res) => {
+    const banners = await Banner.find({
+      active: true,
+    })
+      .sort({
+        sortOrder: 1,
+        createdAt: -1,
+      })
+      .lean();
+
+    res.json(banners);
+  }),
+);
+
+// --------------------
+// Image uploads
+// --------------------
+
+app.post(
+  "/api/uploads/image",
+  admin,
+  wrap(async (req, res) => {
+    if (!req.body.imageData) {
+      return res.status(400).json({
+        message: "Image data is required.",
+      });
+    }
+
+    const imageUrl = await imgBB(req.body.imageData);
+
+    res.status(201).json({ imageUrl });
+  }),
+);
+
+app.post(
+  "/api/public/payment-proof",
+  wrap(async (req, res) => {
+    if (!req.body.imageData) {
+      return res.status(400).json({
+        message: "Payment screenshot is required.",
+      });
+    }
+
+    const imageUrl = await imgBB(req.body.imageData);
+
+    res.status(201).json({ imageUrl });
+  }),
+);
+
+// --------------------
+// Admin product management
+// --------------------
+
+app.get(
+  "/api/admin/products",
+  admin,
+  wrap(async (_req, res) => {
+    const products = await Product.find().sort({ createdAt: -1 }).lean();
+
+    res.json(products);
+  }),
+);
+
+app.post(
+  "/api/admin/products",
+  admin,
+  wrap(async (req, res) => {
+    const body = req.body;
+    const price = Number(body.price);
+
+    if (!body.title?.trim() || !Number.isFinite(price) || price < 0) {
+      return res.status(400).json({
+        message: "Title and valid price required.",
+      });
+    }
+
+    const product = await Product.create({
+      title: body.title.trim(),
+      slug: `${slugify(body.title)}-${Date.now().toString(36)}`,
+      description: body.description || "",
+      price,
+      compareAtPrice: Number(body.compareAtPrice || 0),
+      category: body.category || "Clothing",
+      images: Array.isArray(body.images) ? body.images : [],
+      sizes: Array.isArray(body.sizes) ? body.sizes : [],
+      colors: Array.isArray(body.colors) ? body.colors : [],
+      stock: Math.max(0, Number(body.stock || 0)),
+      sku: body.sku || "",
+      material: body.material || "",
+      gsm: body.gsm || "",
+      tags: Array.isArray(body.tags) ? body.tags : [],
+      active: true,
+    });
+
+    res.status(201).json(product);
+  }),
+);
+
+app.delete(
+  "/api/admin/products/:id",
+  admin,
+  wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid product ID.",
+      });
+    }
+
+    const product = await Product.findByIdAndDelete(req.params.id);
+
+    if (!product) {
+      return res.status(404).json({
+        message: "Product not found.",
+      });
+    }
+
+    await Review.deleteMany({
+      product: product._id,
+    });
+
+    res.json({ message: "Product deleted." });
+  }),
+);
+
+// --------------------
+// Admin banner management
+// --------------------
+
+app.get(
+  "/api/admin/banners",
+  admin,
+  wrap(async (_req, res) => {
+    const banners = await Banner.find().sort({ sortOrder: 1 }).lean();
+
+    res.json(banners);
+  }),
+);
+
+app.post(
+  "/api/admin/banners",
+  admin,
+  wrap(async (req, res) => {
+    const body = req.body;
+
+    if (!body.imageUrl) {
+      return res.status(400).json({
+        message: "Banner image required.",
+      });
+    }
+
+    const banner = await Banner.create({
+      ...body,
+      sortOrder: Number(body.sortOrder || 0),
+    });
+
+    res.status(201).json(banner);
+  }),
+);
+
+app.patch(
+  "/api/admin/banners/:id",
+  admin,
+  wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid banner ID.",
+      });
+    }
+
+    const allowedFields = [
+      "title",
+      "subtitle",
+      "imageUrl",
+      "link",
+      "active",
+      "sortOrder",
+    ];
+
+    const update = {};
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        update[field] =
+          field === "sortOrder" ? Number(req.body[field]) : req.body[field];
+      }
+    }
+
+    const banner = await Banner.findByIdAndUpdate(req.params.id, update, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!banner) {
+      return res.status(404).json({
+        message: "Banner not found.",
+      });
+    }
+
+    res.json(banner);
+  }),
+);
+
+app.delete(
+  "/api/admin/banners/:id",
+  admin,
+  wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid banner ID.",
+      });
+    }
+
+    const banner = await Banner.findByIdAndDelete(req.params.id);
+
+    if (!banner) {
+      return res.status(404).json({
+        message: "Banner not found.",
+      });
+    }
+
+    res.json({ message: "Banner deleted." });
+  }),
+);
+
+// --------------------
+// Create an order
+// --------------------
+
+app.post(
+  "/api/orders",
+  wrap(async (req, res) => {
+    const body = req.body;
+
+    if (
+      !body.customerName?.trim() ||
+      !body.phone?.trim() ||
+      !body.address?.trim() ||
+      !Array.isArray(body.items) ||
+      body.items.length === 0
+    ) {
+      return res.status(400).json({
+        message: "Name, phone, address and cart items required.",
+      });
+    }
+
+    const paymentMethods = ["cod", "bkash", "nagad", "rocket"];
+
+    const method = paymentMethods.includes(body.paymentMethod)
+      ? body.paymentMethod
+      : "cod";
+
+    if (
+      method !== "cod" &&
+      !String(body.transactionId || "").trim() &&
+      !String(body.paymentScreenshot || "").trim()
+    ) {
+      return res.status(400).json({
+        message: "Enter transaction ID or upload screenshot.",
+      });
+    }
+
+    const productIds = body.items.map((item) => item.productId);
+
+    const products = await Product.find({
+      _id: { $in: productIds },
+      active: true,
+    });
+
+    const productMap = new Map(
+      products.map((product) => [String(product._id), product]),
+    );
+
+    const items = body.items.map((item) => {
+      const product = productMap.get(String(item.productId));
+
+      if (!product) {
+        const error = new Error("A product is no longer available.");
+        error.status = 400;
+        throw error;
+      }
+
+      const quantity = Number(item.quantity || 1);
+
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+        const error = new Error("Invalid product quantity.");
+        error.status = 400;
+        throw error;
+      }
+
+      return {
+        product: product._id,
+        title: product.title,
+        image: product.images?.[0] || "",
+        price: product.price,
+        quantity,
+        size: String(item.size || ""),
+      };
+    });
+
+    const subtotal = items.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0,
+    );
+
+    const requestedDelivery = Number(body.deliveryCharge ?? 80);
+
+    const deliveryCharge = Number.isFinite(requestedDelivery)
+      ? Math.max(0, requestedDelivery)
+      : 80;
+
+    const orderNumber =
+      `TIE-${Date.now().toString(36).toUpperCase()}-` +
+      Math.random().toString(36).slice(2, 6).toUpperCase();
+
+    let userId = null;
+
+    try {
+      const decoded = jwt.verify(body.token || "", process.env.JWT_SECRET);
+
+      if (decoded.role === "customer" && decoded.sub) {
+        userId = decoded.sub;
+      }
+    } catch {
+      // Guest checkout is allowed.
+    }
+
+    const order = await Order.create({
+      orderNumber,
+      user: userId,
+      customerName: body.customerName.trim(),
+      phone: body.phone.trim(),
+      email: body.email || "",
+      address: body.address.trim(),
+      city: body.city || "",
+      items,
+      subtotal,
+      deliveryCharge,
+      total: subtotal + deliveryCharge,
+      paymentMethod: method,
+      transactionId: body.transactionId || "",
+      paymentScreenshot: body.paymentScreenshot || "",
+      paymentStatus: method === "cod" ? "not_required" : "pending_verification",
+    });
+
+    // --------------------
+    // Professional Telegram Order Notification
+    // --------------------
+
+    const formatMoney = (amount) =>
+      `৳${Number(amount || 0).toLocaleString("en-BD")}`;
+
+    const paymentLabels = {
+      cod: "Cash on Delivery (COD)",
+      bkash: "bKash",
+      nagad: "Nagad",
+      rocket: "Rocket",
+    };
+
+    const itemList = items
+      .map((item, index) => {
+        const sizeText = item.size ? ` | Size: ${item.size}` : "";
+        const lineTotal = item.price * item.quantity;
+
+        return [
+          `${index + 1}. ${item.title}`,
+          `   Quantity: ${item.quantity}${sizeText}`,
+          `   Unit Price: ${formatMoney(item.price)}`,
+          `   Item Total: ${formatMoney(lineTotal)}`,
+        ].join("\n");
+      })
+      .join("\n\n");
+
+    const address = [order.address, order.city]
+      .map((part) => String(part || "").trim())
+      .filter(Boolean)
+      .join(", ");
+
+    const paymentDetails =
+      method === "cod"
+        ? "Payment Status: Pay on delivery"
+        : [
+            `Transaction ID: ${order.transactionId || "Not provided"}`,
+            `Payment Status: ${order.paymentStatus || "Pending verification"}`,
+          ].join("\n");
+
+    const notification = [
+      "🛍️ TAKE IT EASY",
+      "━━━━━━━━━━━━━━━━━━━━",
+      "✨ NEW ORDER RECEIVED",
+      "━━━━━━━━━━━━━━━━━━━━",
+      "",
+      "🧾 ORDER INFORMATION",
+      `Order ID: ${orderNumber}`,
+      `Order Status: ${(order.status || "pending").toUpperCase()}`,
+      "",
+      "👤 CUSTOMER DETAILS",
+      `Name: ${order.customerName}`,
+      `Phone: ${order.phone}`,
+      `Address: ${address || "Not provided"}`,
+      ...(order.email ? [`Email: ${order.email}`] : []),
+      "",
+      "📦 ORDER SUMMARY",
+      "────────────────────",
+      itemList,
+      "",
+      "💳 PAYMENT DETAILS",
+      `Payment Method: ${paymentLabels[method] || method.toUpperCase()}`,
+      paymentDetails,
+      `Payment Screenshot: ${order.paymentScreenshot || "Not provided"}`,
+      "",
+      "━━━━━━━━━━━━━━━━━━━━",
+      `Subtotal: ${formatMoney(order.subtotal)}`,
+      `Delivery Charge: ${formatMoney(order.deliveryCharge)}`,
+      `💰 TOTAL PAYABLE: ${formatMoney(order.total)}`,
+      "━━━━━━━━━━━━━━━━━━━━",
+      "",
+      "Thank you for choosing TAKE IT EASY.",
+      "Please review and process this order.",
+    ].join("\n");
+
+    // Telegram failure should not cancel a valid order.
+    await telegram(notification).catch((error) => {
+      console.error("Telegram notification failed:", error.message);
+    });
+
+    res.status(201).json({
+      orderNumber,
+      status: order.status,
+      total: order.total,
+    });
+  }),
+);
+
+// --------------------
+// Track an order
+// --------------------
+
+app.post(
+  "/api/orders/track",
+  wrap(async (req, res) => {
+    const orderNumber = String(req.body.orderNumber || "").trim();
+    const phone = String(req.body.phone || "").trim();
+
+    if (!orderNumber || !phone) {
+      return res.status(400).json({
+        message: "Order number and phone are required.",
+      });
+    }
+
+    const order = await Order.findOne({
+      orderNumber,
+      phone,
+    })
+      .select("-user -email -paymentScreenshot -transactionId")
+      .lean();
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order number and phone did not match.",
+      });
+    }
+
+    res.json(order);
+  }),
+);
+
+// --------------------
+// Customer order history
+// --------------------
+
+app.get(
+  "/api/orders/mine",
+  auth,
+  wrap(async (req, res) => {
+    const orders = await Order.find({
+      user: req.userId,
+    })
+      .select("-paymentScreenshot -transactionId")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json(orders);
+  }),
+);
+
+// --------------------
+// Admin order management
+// --------------------
+
+app.get(
+  "/api/admin/orders",
+  admin,
+  wrap(async (_req, res) => {
+    const orders = await Order.find().sort({ createdAt: -1 }).limit(500).lean();
+
+    res.json(orders);
+  }),
+);
+
+app.patch(
+  "/api/admin/orders/:id",
+  admin,
+  wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid order ID.",
+      });
+    }
+
+    const update = {};
+
+    const allowedStatuses = [
+      "pending",
+      "confirmed",
+      "processing",
+      "shipped",
+      "delivered",
+      "cancelled",
+    ];
+
+    const allowedPaymentStatuses = [
+      "not_required",
+      "pending_verification",
+      "verified",
+      "rejected",
+    ];
+
+    if (allowedStatuses.includes(req.body.status)) {
+      update.status = req.body.status;
+    }
+
+    if (allowedPaymentStatuses.includes(req.body.paymentStatus)) {
+      update.paymentStatus = req.body.paymentStatus;
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({
+        message: "No valid order changes provided.",
+      });
+    }
+
+    const order = await Order.findByIdAndUpdate(req.params.id, update, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
+    }
+
+    res.json(order);
+  }),
+);
+
+// --------------------
+// Unknown API routes
+// --------------------
+
+app.use((req, res) => {
+  res.status(404).json({
+    message: "API route not found.",
+    path: req.originalUrl,
+    hint: "Check the API URL. Available endpoints use /api/...",
+  });
+});
+
+// --------------------
+// Central error handler
+// --------------------
+
+app.use((error, _req, res, _next) => {
+  console.error(error);
+
+  if (res.headersSent) {
+    return;
+  }
+
+  const status =
+    Number.isInteger(error.status) && error.status >= 400 && error.status < 600
+      ? error.status
+      : 500;
+
+  res.status(status).json({
+    message: status === 500 ? "Internal server error." : error.message,
+  });
+});
+
+// --------------------
+// Start server
+// --------------------
+
+async function startServer() {
+  if (!process.env.MONGODB_URI) {
+    throw new Error("MONGODB_URI is missing from server/.env");
+  }
+
+  await mongoose.connect(process.env.MONGODB_URI);
+
+  console.log("MongoDB connected.");
+
+  await seedDemoData();
+
+  const server = app.listen(port, () => {
+    console.log(`Take It Easy API listening at http://localhost:${port}`);
+    console.log(`Products: http://localhost:${port}/api/products`);
+    console.log(`Banners: http://localhost:${port}/api/banners`);
+  });
+
+  server.on("error", (error) => {
+    if (error.code === "EADDRINUSE") {
+      console.error(
+        `Port ${port} is already in use. Stop the other server or change PORT in server/.env.`,
+      );
+    } else {
+      console.error("Server error:", error);
+    }
+
+    process.exitCode = 1;
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Server startup failed:", error.message);
+  process.exit(1);
+});
