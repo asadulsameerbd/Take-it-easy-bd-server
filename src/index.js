@@ -1090,6 +1090,21 @@ app.get(
 // Admin order management
 // --------------------
 
+// ✅ NEW: New orders only (pending status)
+// Ei route ta /api/admin/orders er agey rakhte hobe
+app.get(
+  "/api/admin/orders/new",
+  admin,
+  wrap(async (_req, res) => {
+    const orders = await Order.find({ status: "pending" })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+
+    res.json(orders);
+  }),
+);
+
 app.get(
   "/api/admin/orders",
   admin,
