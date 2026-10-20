@@ -37,6 +37,14 @@ app.use(
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
+// ✅ Cache GET requests for faster repeat visits
+app.use((req, res, next) => {
+  if (req.method === "GET") {
+    res.set("Cache-Control", "public, max-age=60, s-maxage=120");
+  }
+  next();
+});
+
 // --------------------
 // MongoDB connection
 // --------------------
@@ -60,7 +68,13 @@ async function connectDatabase() {
 
   if (!connectionPromise) {
     connectionPromise = mongoose
-      .connect(process.env.MONGODB_URI)
+      .connect(process.env.MONGODB_URI, {
+        // ✅ Connection pooling for faster cold starts
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 45000,
+      })
       .then(() => {
         console.log("MongoDB connected.");
       })
@@ -365,7 +379,7 @@ app.get(
 
     const products = await Product.find(filter)
       .sort({ createdAt: -1 })
-      .limit(300)
+      .limit(50)
       .lean();
 
     res.json(products);
@@ -497,7 +511,7 @@ app.post(
   }),
 );
 
-// ✅ NEW: Bulk image upload (multiple images in one request)
+// ✅ Bulk image upload (multiple images in one request)
 app.post(
   "/api/uploads/images",
   admin,
@@ -572,6 +586,11 @@ app.post(
       description: body.description || "",
       price,
       compareAtPrice: Number(body.compareAtPrice || 0),
+      // ✅ New: manual discount override (0 = auto)
+      discountPercent: Math.max(
+        0,
+        Math.min(90, Number(body.discountPercent || 0)),
+      ),
       category: body.category || "Clothing",
       images: Array.isArray(body.images) ? body.images : [],
       sizes: Array.isArray(body.sizes) ? body.sizes : [],
@@ -588,7 +607,6 @@ app.post(
   }),
 );
 
-// ✅ NEW: Admin product update (edit) route
 app.patch(
   "/api/admin/products/:id",
   admin,
@@ -604,6 +622,7 @@ app.patch(
       "description",
       "price",
       "compareAtPrice",
+      "discountPercent", // ✅ New
       "category",
       "images",
       "sizes",
@@ -624,7 +643,8 @@ app.patch(
       if (
         field === "price" ||
         field === "compareAtPrice" ||
-        field === "stock"
+        field === "stock" ||
+        field === "discountPercent"
       ) {
         const num = Number(req.body[field]);
         if (!Number.isFinite(num)) {
@@ -632,7 +652,12 @@ app.patch(
             message: `Invalid value for ${field}.`,
           });
         }
-        update[field] = field === "stock" ? Math.max(0, num) : num;
+        update[field] =
+          field === "stock"
+            ? Math.max(0, num)
+            : field === "discountPercent"
+              ? Math.max(0, Math.min(90, num))
+              : num;
       } else if (
         field === "images" ||
         field === "sizes" ||
@@ -653,7 +678,6 @@ app.patch(
       });
     }
 
-    // Title change hole slug-o update kore dei
     if (update.title?.trim()) {
       update.title = update.title.trim();
       update.slug = `${slugify(update.title)}-${Date.now().toString(36)}`;
@@ -996,7 +1020,6 @@ app.post(
       "Please review and process this order.",
     ].join("\n");
 
-    // Telegram failure must not cancel a valid order.
     try {
       await telegram(notification);
     } catch (error) {

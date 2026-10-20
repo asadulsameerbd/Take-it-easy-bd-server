@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+
 const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -14,6 +15,7 @@ const userSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
 const productSchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
@@ -21,6 +23,7 @@ const productSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
     compareAtPrice: { type: Number, default: 0 },
+    discountPercent: { type: Number, default: 0, min: 0, max: 90 }, // ✅ NEW
     category: { type: String, default: "Clothing" },
     images: [String],
     sizes: [String],
@@ -34,6 +37,7 @@ const productSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
 const reviewSchema = new mongoose.Schema(
   {
     product: {
@@ -48,7 +52,9 @@ const reviewSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
 reviewSchema.index({ product: 1, user: 1 }, { unique: true });
+
 const orderSchema = new mongoose.Schema(
   {
     orderNumber: { type: String, unique: true, required: true },
@@ -95,6 +101,7 @@ const orderSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
 const bannerSchema = new mongoose.Schema(
   {
     title: String,
@@ -107,6 +114,7 @@ const bannerSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
 export const User = mongoose.model("User", userSchema);
 export const Product = mongoose.model("Product", productSchema);
 export const Review = mongoose.model("Review", reviewSchema);
