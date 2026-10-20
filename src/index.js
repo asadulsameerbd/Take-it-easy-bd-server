@@ -4,6 +4,7 @@ import cors from "cors";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { EventEmitter } from "events";
 
 import { User, Product, Review, Order, Banner } from "./models.js";
 import { tokenFor, auth, admin, slugify, imgBB, telegram } from "./helpers.js";
@@ -69,7 +70,6 @@ async function connectDatabase() {
   if (!connectionPromise) {
     connectionPromise = mongoose
       .connect(process.env.MONGODB_URI, {
-        // ✅ Connection pooling for faster cold starts
         maxPoolSize: 10,
         minPoolSize: 2,
         serverSelectionTimeoutMS: 5000,
@@ -103,7 +103,6 @@ async function initializeDatabase() {
 }
 
 // All API requests initialize the database before reaching routes.
-// CORS middleware runs first so browser preflight requests can be handled.
 app.use((req, res, next) => {
   initializeDatabase()
     .then(() => next())
@@ -177,6 +176,71 @@ const clean = (user) => ({
 });
 
 // --------------------
+// SSE: Live order updates
+// --------------------
+
+const orderEvents = new EventEmitter();
+orderEvents.setMaxListeners(100);
+
+// ✅ SSE endpoint — must be AFTER cors/express.json/initializeDatabase
+app.get("/api/admin/orders/stream", (req, res) => {
+  const origin = req.headers.origin;
+
+  if (origin && allowedOrigins.includes(origin.replace(/\/+$/, ""))) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  res.write(`event: connected\ndata: {"ok":true}\n\n`);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: heartbeat\n\n`);
+    } catch {
+      /* ignore */
+    }
+  }, 25000);
+
+  function onNewOrder(order) {
+    try {
+      res.write(`event: new-order\ndata: ${JSON.stringify(order)}\n\n`);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function onOrderUpdate(order) {
+    try {
+      res.write(`event: order-updated\ndata: ${JSON.stringify(order)}\n\n`);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  orderEvents.on("new-order", onNewOrder);
+  orderEvents.on("order-updated", onOrderUpdate);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    orderEvents.off("new-order", onNewOrder);
+    orderEvents.off("order-updated", onOrderUpdate);
+    try {
+      res.end();
+    } catch {
+      /* ignore */
+    }
+  });
+});
+
+// --------------------
 // Customer authentication
 // --------------------
 
@@ -193,9 +257,7 @@ app.post(
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    const existingUser = await User.findOne({
-      email: normalizedEmail,
-    });
+    const existingUser = await User.findOne({ email: normalizedEmail });
 
     if (existingUser) {
       return res.status(409).json({
@@ -358,18 +420,8 @@ app.get(
       const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
       filter.$or = [
-        {
-          title: {
-            $regex: safeQuery,
-            $options: "i",
-          },
-        },
-        {
-          description: {
-            $regex: safeQuery,
-            $options: "i",
-          },
-        },
+        { title: { $regex: safeQuery, $options: "i" } },
+        { description: { $regex: safeQuery, $options: "i" } },
       ];
     }
 
@@ -412,10 +464,7 @@ app.get(
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({
-      product,
-      reviews,
-    });
+    res.json({ product, reviews });
   }),
 );
 
@@ -448,10 +497,7 @@ app.post(
     }
 
     const review = await Review.findOneAndUpdate(
-      {
-        product: product._id,
-        user: user._id,
-      },
+      { product: product._id, user: user._id },
       {
         product: product._id,
         user: user._id,
@@ -478,13 +524,8 @@ app.post(
 app.get(
   "/api/banners",
   wrap(async (_req, res) => {
-    const banners = await Banner.find({
-      active: true,
-    })
-      .sort({
-        sortOrder: 1,
-        createdAt: -1,
-      })
+    const banners = await Banner.find({ active: true })
+      .sort({ sortOrder: 1, createdAt: -1 })
       .lean();
 
     res.json(banners);
@@ -511,7 +552,6 @@ app.post(
   }),
 );
 
-// ✅ Bulk image upload (multiple images in one request)
 app.post(
   "/api/uploads/images",
   admin,
@@ -586,7 +626,6 @@ app.post(
       description: body.description || "",
       price,
       compareAtPrice: Number(body.compareAtPrice || 0),
-      // ✅ New: manual discount override (0 = auto)
       discountPercent: Math.max(
         0,
         Math.min(90, Number(body.discountPercent || 0)),
@@ -622,7 +661,7 @@ app.patch(
       "description",
       "price",
       "compareAtPrice",
-      "discountPercent", // ✅ New
+      "discountPercent",
       "category",
       "images",
       "sizes",
@@ -716,9 +755,7 @@ app.delete(
       });
     }
 
-    await Review.deleteMany({
-      product: product._id,
-    });
+    await Review.deleteMany({ product: product._id });
 
     res.json({ message: "Product deleted." });
   }),
@@ -923,7 +960,7 @@ app.post(
         userId = decoded.sub;
       }
     } catch {
-      // Guest checkout is allowed.
+      // Guest checkout allowed
     }
 
     const order = await Order.create({
@@ -1026,6 +1063,26 @@ app.post(
       console.error("Telegram notification failed:", error.message);
     }
 
+    // ✅ SSE emit — notify all connected admins about the new order
+    try {
+      orderEvents.emit("new-order", {
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        customerName: order.customerName,
+        phone: order.phone,
+        address: order.address,
+        city: order.city,
+        total: order.total,
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+        paymentMethod: order.paymentMethod,
+        createdAt: order.createdAt,
+        items: order.items,
+      });
+    } catch (error) {
+      console.error("SSE emit failed:", error.message);
+    }
+
     res.status(201).json({
       orderNumber,
       status: order.status,
@@ -1050,10 +1107,7 @@ app.post(
       });
     }
 
-    const order = await Order.findOne({
-      orderNumber,
-      phone,
-    })
+    const order = await Order.findOne({ orderNumber, phone })
       .select("-user -email -paymentScreenshot -transactionId")
       .lean();
 
@@ -1075,9 +1129,7 @@ app.get(
   "/api/orders/mine",
   auth,
   wrap(async (req, res) => {
-    const orders = await Order.find({
-      user: req.userId,
-    })
+    const orders = await Order.find({ user: req.userId })
       .select("-paymentScreenshot -transactionId")
       .sort({ createdAt: -1 })
       .lean();
@@ -1090,8 +1142,7 @@ app.get(
 // Admin order management
 // --------------------
 
-// ✅ NEW: New orders only (pending status)
-// Ei route ta /api/admin/orders er agey rakhte hobe
+// ✅ New orders only (pending status) — MUST be before /api/admin/orders/:id
 app.get(
   "/api/admin/orders/new",
   admin,
@@ -1166,6 +1217,18 @@ app.patch(
       return res.status(404).json({
         message: "Order not found.",
       });
+    }
+
+    // ✅ SSE emit — notify all connected admins about the order update
+    try {
+      orderEvents.emit("order-updated", {
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+      });
+    } catch (error) {
+      console.error("SSE emit failed:", error.message);
     }
 
     res.json(order);
