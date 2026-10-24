@@ -22,6 +22,10 @@ const productSchema = new mongoose.Schema(
     slug: { type: String, required: true, unique: true },
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
+
+    // ✅ NEW: কেনার দাম (profit/loss হিসাবের জন্য)
+    cost: { type: Number, default: 0, min: 0 },
+
     compareAtPrice: { type: Number, default: 0 },
     discountPercent: { type: Number, default: 0, min: 0, max: 90 },
     category: { type: String, default: "Clothing" },
@@ -30,7 +34,6 @@ const productSchema = new mongoose.Schema(
     colors: [String],
 
     // ✅ per-size stock — { M: 10, L: 0, XL: 5 }
-    // Mongoose-এ Map হিসেবে define করলে .save() করলে auto .set()/.get() পাবে
     sizeStock: {
       type: Map,
       of: Number,

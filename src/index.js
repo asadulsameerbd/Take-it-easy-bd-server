@@ -194,6 +194,35 @@ const buildSizeStock = (sizes, rawSizeStock) => {
 const sumSizeStock = (sizeStock) =>
   Object.values(sizeStock).reduce((a, b) => a + Number(b || 0), 0);
 
+// ✅ Reports helper — date + status filter থেকে Mongo filter তৈরি
+const buildReportFilter = (query) => {
+  const filter = {};
+
+  if (query.startDate || query.endDate) {
+    filter.createdAt = {};
+    if (query.startDate) {
+      const d = new Date(query.startDate);
+      if (!isNaN(d.getTime())) filter.createdAt.$gte = d;
+    }
+    if (query.endDate) {
+      const d = new Date(query.endDate);
+      if (!isNaN(d.getTime())) {
+        d.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = d;
+      }
+    }
+    if (Object.keys(filter.createdAt).length === 0) {
+      delete filter.createdAt;
+    }
+  }
+
+  if (query.status && query.status !== "all") {
+    filter.status = String(query.status);
+  }
+
+  return filter;
+};
+
 // --------------------
 // SSE: Live order updates
 // --------------------
@@ -625,7 +654,7 @@ app.get(
   }),
 );
 
-// ✅ POST — sizeStock support
+// ✅ POST — sizeStock + cost support
 app.post(
   "/api/admin/products",
   admin,
@@ -657,6 +686,7 @@ app.post(
       slug: `${slugify(body.title)}-${Date.now().toString(36)}`,
       description: body.description || "",
       price,
+      cost: Math.max(0, Number(body.cost || 0)), // ✅ NEW
       compareAtPrice: Number(body.compareAtPrice || 0),
       discountPercent: Math.max(
         0,
@@ -679,7 +709,7 @@ app.post(
   }),
 );
 
-// ✅ PATCH — sizeStock update support
+// ✅ PATCH — sizeStock + cost update support
 app.patch(
   "/api/admin/products/:id",
   admin,
@@ -699,6 +729,7 @@ app.patch(
       "title",
       "description",
       "price",
+      "cost",
       "compareAtPrice",
       "discountPercent",
       "category",
@@ -717,15 +748,22 @@ app.patch(
     for (const field of allowedFields) {
       if (req.body[field] === undefined) continue;
 
-      if (["price", "compareAtPrice", "discountPercent"].includes(field)) {
+      if (
+        ["price", "cost", "compareAtPrice", "discountPercent"].includes(field)
+      ) {
         const num = Number(req.body[field]);
         if (!Number.isFinite(num)) {
           return res.status(400).json({
             message: `Invalid value for ${field}.`,
           });
         }
-        update[field] =
-          field === "discountPercent" ? Math.max(0, Math.min(90, num)) : num;
+        if (field === "discountPercent") {
+          update[field] = Math.max(0, Math.min(90, num));
+        } else if (field === "cost") {
+          update[field] = Math.max(0, num);
+        } else {
+          update[field] = num;
+        }
       } else if (["images", "sizes", "colors", "tags"].includes(field)) {
         update[field] = Array.isArray(req.body[field]) ? req.body[field] : [];
       } else if (field === "active") {
@@ -1301,6 +1339,281 @@ app.patch(
     }
 
     res.json(order);
+  }),
+);
+
+// ============================================================
+// ✅ NEW: Admin — Delivery Charge Override
+// ============================================================
+app.patch(
+  "/api/admin/orders/:id/delivery-charge",
+  admin,
+  wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid order ID.",
+      });
+    }
+
+    const newCharge = Number(req.body.deliveryCharge);
+
+    if (!Number.isFinite(newCharge) || newCharge < 0) {
+      return res.status(400).json({
+        message: "Valid delivery charge required.",
+      });
+    }
+
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
+    }
+
+    order.deliveryCharge = newCharge;
+    order.total = Number(order.subtotal || 0) + newCharge;
+    await order.save();
+
+    try {
+      orderEvents.emit("order-updated", {
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+        deliveryCharge: order.deliveryCharge,
+        total: order.total,
+      });
+    } catch (error) {
+      console.error("SSE emit failed:", error.message);
+    }
+
+    res.json({
+      message: "Delivery charge updated",
+      order: {
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        deliveryCharge: order.deliveryCharge,
+        total: order.total,
+      },
+    });
+  }),
+);
+
+// ============================================================
+// ✅ NEW: Admin — Reports (profit / loss / waste / summary)
+// ============================================================
+app.get(
+  "/api/admin/reports",
+  admin,
+  wrap(async (req, res) => {
+    const filter = buildReportFilter(req.query);
+
+    const orders = await Order.find(filter).lean();
+    const products = await Product.find().lean();
+
+    // productId → cost map
+    const costMap = new Map();
+    for (const p of products) {
+      costMap.set(String(p._id), Number(p.cost || 0));
+    }
+
+    let totalRevenue = 0;
+    let totalCost = 0;
+    let totalProfit = 0;
+    let totalLoss = 0;
+    let totalWaste = 0;
+    let deliveredOrders = 0;
+    let cancelledOrders = 0;
+    let pendingOrders = 0;
+    let paidOrders = 0;
+    let totalDeliveryCollected = 0;
+    let totalItemsSold = 0;
+
+    const perProduct = new Map();
+
+    for (const order of orders) {
+      const isCancelled = order.status === "cancelled";
+      const isDelivered = order.status === "delivered";
+      const isPending = order.status === "pending";
+
+      if (isCancelled) cancelledOrders++;
+      if (isDelivered) deliveredOrders++;
+      if (isPending) pendingOrders++;
+      if (order.paymentStatus === "verified") paidOrders++;
+
+      if (!isCancelled) {
+        totalRevenue += Number(order.total || 0);
+        totalDeliveryCollected += Number(order.deliveryCharge || 0);
+      }
+
+      for (const item of order.items || []) {
+        const quantity = Number(item.quantity || 0);
+        const price = Number(item.price || 0);
+        const cost = costMap.get(String(item.product)) || 0;
+
+        totalItemsSold += quantity;
+
+        const itemRevenue = price * quantity;
+        const itemCost = cost * quantity;
+
+        const key = String(item.product);
+        if (!perProduct.has(key)) {
+          perProduct.set(key, {
+            productId: key,
+            title: item.title || "Unknown",
+            quantitySold: 0,
+            revenue: 0,
+            cost: 0,
+            profit: 0,
+            cancelledQty: 0,
+          });
+        }
+        const bucket = perProduct.get(key);
+
+        if (isCancelled) {
+          totalWaste += itemCost;
+          bucket.cancelledQty += quantity;
+        } else if (isDelivered) {
+          totalCost += itemCost;
+          totalProfit += itemRevenue - itemCost;
+          bucket.quantitySold += quantity;
+          bucket.revenue += itemRevenue;
+          bucket.cost += itemCost;
+          bucket.profit += itemRevenue - itemCost;
+        } else {
+          bucket.quantitySold += quantity;
+          bucket.revenue += itemRevenue;
+          bucket.cost += itemCost;
+          bucket.profit += itemRevenue - itemCost;
+        }
+      }
+    }
+
+    for (const bucket of perProduct.values()) {
+      if (bucket.profit < 0) {
+        totalLoss += Math.abs(bucket.profit);
+      }
+    }
+
+    const perProductList = Array.from(perProduct.values()).sort(
+      (a, b) => b.profit - a.profit,
+    );
+
+    res.json({
+      period: {
+        startDate: req.query.startDate || null,
+        endDate: req.query.endDate || null,
+      },
+      summary: {
+        totalOrders: orders.length,
+        deliveredOrders,
+        cancelledOrders,
+        pendingOrders,
+        paidOrders,
+        totalRevenue,
+        totalCost,
+        totalProfit,
+        totalLoss,
+        totalWaste,
+        totalDeliveryCollected,
+        totalItemsSold,
+      },
+      perProduct: perProductList,
+    });
+  }),
+);
+
+// ============================================================
+// ✅ NEW: Admin — CSV Export
+// ============================================================
+app.get(
+  "/api/admin/reports/export",
+  admin,
+  wrap(async (req, res) => {
+    const filter = buildReportFilter(req.query);
+
+    const orders = await Order.find(filter).sort({ createdAt: -1 }).lean();
+    const products = await Product.find().lean();
+
+    const costMap = new Map();
+    for (const p of products) {
+      costMap.set(String(p._id), Number(p.cost || 0));
+    }
+
+    const header = [
+      "Order Number",
+      "Order Date",
+      "Status",
+      "Payment Status",
+      "Payment Method",
+      "Customer Name",
+      "Phone",
+      "Address",
+      "Product Title",
+      "Size",
+      "Quantity",
+      "Unit Price",
+      "Unit Cost",
+      "Item Revenue",
+      "Item Cost",
+      "Item Profit",
+      "Delivery Charge",
+      "Order Subtotal",
+      "Order Total",
+    ];
+
+    const csvSafe = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+
+    const rows = [header.map(csvSafe).join(",")];
+
+    for (const order of orders) {
+      const isCancelled = order.status === "cancelled";
+
+      for (const item of order.items || []) {
+        const qty = Number(item.quantity || 0);
+        const price = Number(item.price || 0);
+        const cost = costMap.get(String(item.product)) || 0;
+        const revenue = price * qty;
+        const itemCost = cost * qty;
+        const profit = isCancelled ? -itemCost : revenue - itemCost;
+
+        rows.push(
+          [
+            order.orderNumber,
+            order.createdAt ? new Date(order.createdAt).toISOString() : "",
+            order.status,
+            order.paymentStatus,
+            order.paymentMethod,
+            order.customerName,
+            order.phone,
+            `${order.address || ""}${order.city ? `, ${order.city}` : ""}`,
+            item.title,
+            item.size || "",
+            qty,
+            price,
+            cost,
+            revenue,
+            itemCost,
+            profit,
+            order.deliveryCharge || 0,
+            order.subtotal || 0,
+            order.total || 0,
+          ]
+            .map(csvSafe)
+            .join(","),
+        );
+      }
+    }
+
+    const csv = rows.join("\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="take-it-easy-report-${Date.now()}.csv"`,
+    );
+    res.send(csv);
   }),
 );
 
