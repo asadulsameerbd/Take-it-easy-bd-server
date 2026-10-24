@@ -175,6 +175,25 @@ const clean = (user) => ({
   phone: user.phone,
 });
 
+// ✅ sizeStock helpers — Map বা plain object দুটোই handle
+const normalizeSizeStock = (raw) => {
+  if (!raw) return {};
+  if (raw instanceof Map) return Object.fromEntries(raw);
+  if (typeof raw === "object") return raw;
+  return {};
+};
+
+const buildSizeStock = (sizes, rawSizeStock) => {
+  const result = {};
+  for (const s of sizes) {
+    result[s] = Math.max(0, Number(rawSizeStock?.[s] || 0));
+  }
+  return result;
+};
+
+const sumSizeStock = (sizeStock) =>
+  Object.values(sizeStock).reduce((a, b) => a + Number(b || 0), 0);
+
 // --------------------
 // SSE: Live order updates
 // --------------------
@@ -182,7 +201,6 @@ const clean = (user) => ({
 const orderEvents = new EventEmitter();
 orderEvents.setMaxListeners(100);
 
-// ✅ SSE endpoint — must be AFTER cors/express.json/initializeDatabase
 app.get("/api/admin/orders/stream", (req, res) => {
   const origin = req.headers.origin;
 
@@ -607,6 +625,7 @@ app.get(
   }),
 );
 
+// ✅ POST — sizeStock support
 app.post(
   "/api/admin/products",
   admin,
@@ -620,6 +639,19 @@ app.post(
       });
     }
 
+    // ✅ sizeStock normalize
+    const sizes = Array.isArray(body.sizes) ? body.sizes : [];
+    const rawSizeStock =
+      body.sizeStock && typeof body.sizeStock === "object"
+        ? body.sizeStock
+        : {};
+    const sizeStock = buildSizeStock(sizes, rawSizeStock);
+
+    // total stock = sizeStock sum (fallback: body.stock)
+    const totalStock = sizes.length
+      ? sumSizeStock(sizeStock)
+      : Math.max(0, Number(body.stock || 0));
+
     const product = await Product.create({
       title: body.title.trim(),
       slug: `${slugify(body.title)}-${Date.now().toString(36)}`,
@@ -632,9 +664,10 @@ app.post(
       ),
       category: body.category || "Clothing",
       images: Array.isArray(body.images) ? body.images : [],
-      sizes: Array.isArray(body.sizes) ? body.sizes : [],
+      sizes,
+      sizeStock,
       colors: Array.isArray(body.colors) ? body.colors : [],
-      stock: Math.max(0, Number(body.stock || 0)),
+      stock: totalStock,
       sku: body.sku || "",
       material: body.material || "",
       gsm: body.gsm || "",
@@ -646,6 +679,7 @@ app.post(
   }),
 );
 
+// ✅ PATCH — sizeStock update support
 app.patch(
   "/api/admin/products/:id",
   admin,
@@ -654,6 +688,11 @@ app.patch(
       return res.status(400).json({
         message: "Invalid product ID.",
       });
+    }
+
+    const existing = await Product.findById(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ message: "Product not found." });
     }
 
     const allowedFields = [
@@ -666,7 +705,6 @@ app.patch(
       "images",
       "sizes",
       "colors",
-      "stock",
       "sku",
       "material",
       "gsm",
@@ -679,12 +717,7 @@ app.patch(
     for (const field of allowedFields) {
       if (req.body[field] === undefined) continue;
 
-      if (
-        field === "price" ||
-        field === "compareAtPrice" ||
-        field === "stock" ||
-        field === "discountPercent"
-      ) {
+      if (["price", "compareAtPrice", "discountPercent"].includes(field)) {
         const num = Number(req.body[field]);
         if (!Number.isFinite(num)) {
           return res.status(400).json({
@@ -692,17 +725,8 @@ app.patch(
           });
         }
         update[field] =
-          field === "stock"
-            ? Math.max(0, num)
-            : field === "discountPercent"
-              ? Math.max(0, Math.min(90, num))
-              : num;
-      } else if (
-        field === "images" ||
-        field === "sizes" ||
-        field === "colors" ||
-        field === "tags"
-      ) {
+          field === "discountPercent" ? Math.max(0, Math.min(90, num)) : num;
+      } else if (["images", "sizes", "colors", "tags"].includes(field)) {
         update[field] = Array.isArray(req.body[field]) ? req.body[field] : [];
       } else if (field === "active") {
         update[field] = Boolean(req.body[field]);
@@ -711,7 +735,7 @@ app.patch(
       }
     }
 
-    if (Object.keys(update).length === 0) {
+    if (Object.keys(update).length === 0 && req.body.sizeStock === undefined) {
       return res.status(400).json({
         message: "No valid product fields provided.",
       });
@@ -722,16 +746,32 @@ app.patch(
       update.slug = `${slugify(update.title)}-${Date.now().toString(36)}`;
     }
 
+    // ✅ sizeStock + total stock handle
+    const nextSizes =
+      update.sizes !== undefined ? update.sizes : existing.sizes || [];
+
+    const shouldUpdateSizeStock =
+      req.body.sizeStock !== undefined || update.sizes !== undefined;
+
+    if (shouldUpdateSizeStock) {
+      const prevSizeStock = normalizeSizeStock(existing.sizeStock);
+      const rawSizeStock =
+        req.body.sizeStock !== undefined ? req.body.sizeStock : prevSizeStock;
+
+      const nextSizeStock = buildSizeStock(nextSizes, rawSizeStock);
+
+      update.sizeStock = nextSizeStock;
+      update.stock = nextSizes.length
+        ? sumSizeStock(nextSizeStock)
+        : Math.max(0, Number(req.body.stock || existing.stock || 0));
+    } else if (req.body.stock !== undefined) {
+      update.stock = Math.max(0, Number(req.body.stock || 0));
+    }
+
     const product = await Product.findByIdAndUpdate(req.params.id, update, {
       new: true,
       runValidators: true,
     });
-
-    if (!product) {
-      return res.status(404).json({
-        message: "Product not found.",
-      });
-    }
 
     res.json(product);
   }),
@@ -862,7 +902,7 @@ app.delete(
 );
 
 // --------------------
-// Create an order
+// ✅ Create an order — size-wise stock check + কমাও
 // --------------------
 
 app.post(
@@ -883,7 +923,6 @@ app.post(
     }
 
     const paymentMethods = ["cod", "bkash", "nagad", "rocket"];
-
     const method = paymentMethods.includes(body.paymentMethod)
       ? body.paymentMethod
       : "cod";
@@ -899,7 +938,6 @@ app.post(
     }
 
     const productIds = body.items.map((item) => item.productId);
-
     const products = await Product.find({
       _id: { $in: productIds },
       active: true,
@@ -909,32 +947,66 @@ app.post(
       products.map((product) => [String(product._id), product]),
     );
 
-    const items = body.items.map((item) => {
+    const items = [];
+
+    // ✅ প্রতিটা item validate + size stock check
+    for (const item of body.items) {
       const product = productMap.get(String(item.productId));
 
       if (!product) {
-        const error = new Error("A product is no longer available.");
-        error.status = 400;
-        throw error;
+        return res.status(400).json({
+          message: "A product is no longer available.",
+        });
       }
 
       const quantity = Number(item.quantity || 1);
 
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
-        const error = new Error("Invalid product quantity.");
-        error.status = 400;
-        throw error;
+        return res.status(400).json({
+          message: "Invalid product quantity.",
+        });
       }
 
-      return {
+      const size = String(item.size || "");
+
+      // ✅ size-wise stock check (Map থেকে)
+      if (size && product.sizeStock?.get(size) !== undefined) {
+        const available = product.sizeStock.get(size) || 0;
+        if (available < quantity) {
+          return res.status(400).json({
+            message: `${product.title} (Size: ${size}) — only ${available} left in stock.`,
+          });
+        }
+      } else if (Number(product.stock || 0) < quantity) {
+        return res.status(400).json({
+          message: `${product.title} — only ${product.stock} left in stock.`,
+        });
+      }
+
+      items.push({
         product: product._id,
         title: product.title,
         image: product.images?.[0] || "",
         price: product.price,
         quantity,
-        size: String(item.size || ""),
-      };
-    });
+        size,
+      });
+    }
+
+    // ✅ stock কমাও (size-wise + total)
+    for (const item of body.items) {
+      const product = productMap.get(String(item.productId));
+      const quantity = Number(item.quantity || 1);
+      const size = String(item.size || "");
+
+      if (size && product.sizeStock?.get(size) !== undefined) {
+        const available = product.sizeStock.get(size) || 0;
+        product.sizeStock.set(size, Math.max(0, available - quantity));
+      }
+
+      product.stock = Math.max(0, Number(product.stock || 0) - quantity);
+      await product.save();
+    }
 
     const subtotal = items.reduce(
       (sum, item) => sum + item.price * item.quantity,
@@ -942,7 +1014,6 @@ app.post(
     );
 
     const requestedDelivery = Number(body.deliveryCharge ?? 80);
-
     const deliveryCharge = Number.isFinite(requestedDelivery)
       ? Math.max(0, requestedDelivery)
       : 80;
@@ -952,10 +1023,8 @@ app.post(
       Math.random().toString(36).slice(2, 6).toUpperCase();
 
     let userId = null;
-
     try {
       const decoded = jwt.verify(body.token || "", process.env.JWT_SECRET);
-
       if (decoded.role === "customer" && decoded.sub) {
         userId = decoded.sub;
       }
@@ -982,7 +1051,7 @@ app.post(
     });
 
     // --------------------
-    // Telegram notification
+    // Telegram notification (size সহ)
     // --------------------
 
     const formatMoney = (amount) =>

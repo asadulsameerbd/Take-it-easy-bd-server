@@ -23,12 +23,23 @@ const productSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
     compareAtPrice: { type: Number, default: 0 },
-    discountPercent: { type: Number, default: 0, min: 0, max: 90 }, // ✅ NEW
+    discountPercent: { type: Number, default: 0, min: 0, max: 90 },
     category: { type: String, default: "Clothing" },
     images: [String],
     sizes: [String],
     colors: [String],
+
+    // ✅ per-size stock — { M: 10, L: 0, XL: 5 }
+    // Mongoose-এ Map হিসেবে define করলে .save() করলে auto .set()/.get() পাবে
+    sizeStock: {
+      type: Map,
+      of: Number,
+      default: () => new Map(),
+    },
+
+    // ✅ Legacy total stock — sizeStock এর sum রাখো (backward compat)
     stock: { type: Number, default: 0 },
+
     sku: String,
     material: String,
     gsm: String,
