@@ -1,7 +1,9 @@
 import jwt from "jsonwebtoken";
 import { v2 as cloudinary } from "cloudinary";
 
-// ✅ Cloudinary configure
+/* ============================================================ */
+/* Cloudinary configuration                                     */
+/* ============================================================ */
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -9,6 +11,9 @@ cloudinary.config({
   secure: true,
 });
 
+/* ============================================================ */
+/* JWT helpers                                                  */
+/* ============================================================ */
 export const tokenFor = (user) =>
   jwt.sign(
     { sub: String(user._id), role: "customer" },
@@ -49,6 +54,9 @@ export function admin(req, res, next) {
   }
 }
 
+/* ============================================================ */
+/* Slug helper                                                  */
+/* ============================================================ */
 export const slugify = (s) =>
   String(s || "product")
     .toLowerCase()
@@ -57,7 +65,7 @@ export const slugify = (s) =>
     .replace(/^-|-$/g, "") || `product-${Date.now()}`;
 
 /* ============================================================ */
-/* ✅ Cloudinary Upload — Buffer/Stream based (ENAMETOOLONG fix) */
+/* Cloudinary Upload — Buffer/Stream based (ENAMETOOLONG fix)   */
 /* ============================================================ */
 export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
   if (!dataUrl) {
@@ -77,7 +85,7 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
   try {
     let buffer;
 
-    // ✅ Handle data URL, raw base64 string, or Buffer
+    // Handle data URL, raw base64 string, or Buffer
     if (typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
       const base64Data = dataUrl.replace(/^data:[^;]+;base64,/, "");
       buffer = Buffer.from(base64Data, "base64");
@@ -93,7 +101,7 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
       throw new Error("Empty image data.");
     }
 
-    // ✅ Use upload_stream to avoid ENAMETOOLONG
+    // Use upload_stream to avoid ENAMETOOLONG
     const result = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         {
@@ -122,9 +130,12 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
   }
 }
 
-// ✅ Backward compat — পুরনো imgBB() call-ও কাজ করবে
+// Backward compat — old imgBB() calls still work
 export const imgBB = uploadToCloudinary;
 
+/* ============================================================ */
+/* Telegram notification                                        */
+/* ============================================================ */
 export async function telegram(message) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;

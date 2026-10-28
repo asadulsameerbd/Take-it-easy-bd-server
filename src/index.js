@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { EventEmitter } from "events";
 
-import { User, Product, Review, Order, Banner } from "./models.js";
+import { User, Product, Review, Order, Banner, Settings } from "./models.js";
 import {
   tokenFor,
   auth,
@@ -129,6 +129,7 @@ app.get("/", (_req, res) => {
       products: "/api/products",
       banners: "/api/banners",
       orders: "/api/orders",
+      deliverySettings: "/api/settings/delivery",
     },
   });
 });
@@ -228,6 +229,17 @@ const buildReportFilter = (query) => {
   }
 
   return filter;
+};
+
+// ✅ Global delivery helper — Settings থেকে global value বের করা
+const getGlobalDelivery = async () => {
+  try {
+    const s = await Settings.findOne({ key: "global" }).lean();
+    const val = Number(s?.globalDeliveryCharge);
+    return Number.isFinite(val) && val >= 0 ? val : 80;
+  } catch {
+    return 80;
+  }
 };
 
 // --------------------
@@ -460,6 +472,17 @@ app.post(
   }),
 );
 
+// ============================================================
+// ✅ Public — global delivery charge (checkout fallback)
+// ============================================================
+app.get(
+  "/api/settings/delivery",
+  wrap(async (_req, res) => {
+    const deliveryCharge = await getGlobalDelivery();
+    res.json({ deliveryCharge });
+  }),
+);
+
 // --------------------
 // Public products
 // --------------------
@@ -659,6 +682,49 @@ app.post(
 );
 
 // --------------------
+// Admin settings (global delivery charge)
+// --------------------
+
+app.get(
+  "/api/admin/settings",
+  admin,
+  wrap(async (_req, res) => {
+    let s = await Settings.findOne({ key: "global" });
+    if (!s) {
+      s = await Settings.create({ key: "global", globalDeliveryCharge: 80 });
+    }
+
+    res.json({
+      globalDeliveryCharge: Math.max(0, Number(s.globalDeliveryCharge ?? 80)),
+    });
+  }),
+);
+
+app.patch(
+  "/api/admin/settings",
+  admin,
+  wrap(async (req, res) => {
+    const val = Number(req.body.globalDeliveryCharge);
+
+    if (!Number.isFinite(val) || val < 0) {
+      return res.status(400).json({
+        message: "Valid delivery charge required.",
+      });
+    }
+
+    const s = await Settings.findOneAndUpdate(
+      { key: "global" },
+      { $set: { globalDeliveryCharge: val } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    res.json({
+      globalDeliveryCharge: Math.max(0, Number(s.globalDeliveryCharge ?? 80)),
+    });
+  }),
+);
+
+// --------------------
 // Admin product management
 // --------------------
 
@@ -672,7 +738,7 @@ app.get(
   }),
 );
 
-// ✅ POST — sizeStock + cost support
+// ✅ POST — sizeStock + cost + deliveryCharge support
 app.post(
   "/api/admin/products",
   admin,
@@ -710,6 +776,8 @@ app.post(
         0,
         Math.min(90, Number(body.discountPercent || 0)),
       ),
+      // ✅ NEW: per-product delivery charge
+      deliveryCharge: Math.max(0, Number(body.deliveryCharge || 0)),
       category: body.category || "Clothing",
       images: Array.isArray(body.images) ? body.images : [],
       sizes,
@@ -727,7 +795,7 @@ app.post(
   }),
 );
 
-// ✅ PATCH — sizeStock + cost update support
+// ✅ PATCH — sizeStock + cost + deliveryCharge update support
 app.patch(
   "/api/admin/products/:id",
   admin,
@@ -750,6 +818,7 @@ app.patch(
       "cost",
       "compareAtPrice",
       "discountPercent",
+      "deliveryCharge", // ✅ NEW
       "category",
       "images",
       "sizes",
@@ -767,7 +836,13 @@ app.patch(
       if (req.body[field] === undefined) continue;
 
       if (
-        ["price", "cost", "compareAtPrice", "discountPercent"].includes(field)
+        [
+          "price",
+          "cost",
+          "compareAtPrice",
+          "discountPercent",
+          "deliveryCharge",
+        ].includes(field)
       ) {
         const num = Number(req.body[field]);
         if (!Number.isFinite(num)) {
@@ -777,7 +852,7 @@ app.patch(
         }
         if (field === "discountPercent") {
           update[field] = Math.max(0, Math.min(90, num));
-        } else if (field === "cost") {
+        } else if (field === "cost" || field === "deliveryCharge") {
           update[field] = Math.max(0, num);
         } else {
           update[field] = num;
@@ -958,7 +1033,7 @@ app.delete(
 );
 
 // --------------------
-// ✅ Create an order — size-wise stock check + কমাও
+// ✅ Create an order — size-wise stock check + delivery recompute
 // --------------------
 
 app.post(
@@ -1069,10 +1144,24 @@ app.post(
       0,
     );
 
-    const requestedDelivery = Number(body.deliveryCharge ?? 80);
+    // ============================================================
+    // ✅ Server-side delivery charge — trusted computation
+    // Priority: product-specific deliveryCharge > global settings > 80
+    // ============================================================
+    const globalDelivery = await getGlobalDelivery();
+
+    const productDeliveryList = products
+      .map((p) => Number(p.deliveryCharge || 0))
+      .filter((n) => n > 0);
+
+    const autoDelivery = productDeliveryList.length
+      ? Math.max(...productDeliveryList)
+      : globalDelivery;
+
+    const requestedDelivery = Number(body.deliveryCharge ?? autoDelivery);
     const deliveryCharge = Number.isFinite(requestedDelivery)
       ? Math.max(0, requestedDelivery)
-      : 80;
+      : autoDelivery;
 
     const orderNumber =
       `TIE-${Date.now().toString(36).toUpperCase()}-` +
@@ -1361,7 +1450,7 @@ app.patch(
 );
 
 // ============================================================
-// ✅ NEW: Admin — Delivery Charge Override
+// ✅ Admin — Delivery Charge Override
 // ============================================================
 app.patch(
   "/api/admin/orders/:id/delivery-charge",
@@ -1419,7 +1508,48 @@ app.patch(
 );
 
 // ============================================================
-// ✅ NEW: Admin — Reports (profit / loss / waste / summary)
+// ✅ NEW: Admin — Delete an order (permanent)
+// ============================================================
+app.delete(
+  "/api/admin/orders/:id",
+  admin,
+  wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        message: "Invalid order ID.",
+      });
+    }
+
+    const order = await Order.findByIdAndDelete(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
+    }
+
+    // ✅ SSE emit — notify all connected admins about the deletion
+    try {
+      orderEvents.emit("order-updated", {
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        deleted: true,
+      });
+    } catch (error) {
+      console.error("SSE emit failed:", error.message);
+    }
+
+    res.json({
+      message: "Order deleted successfully.",
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+    });
+  }),
+);
+
+// ============================================================
+// ✅ Admin — Reports (profit / loss / waste / summary)
 // ============================================================
 app.get(
   "/api/admin/reports",
@@ -1542,7 +1672,7 @@ app.get(
 );
 
 // ============================================================
-// ✅ NEW: Admin — CSV Export
+// ✅ Admin — CSV Export
 // ============================================================
 app.get(
   "/api/admin/reports/export",

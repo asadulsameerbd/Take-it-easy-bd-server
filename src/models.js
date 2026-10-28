@@ -23,7 +23,7 @@ const productSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
 
-    // ✅ NEW: কেনার দাম (profit/loss হিসাবের জন্য)
+    // ✅ কেনার দাম (profit/loss হিসাবের জন্য)
     cost: { type: Number, default: 0, min: 0 },
 
     compareAtPrice: { type: Number, default: 0 },
@@ -42,6 +42,10 @@ const productSchema = new mongoose.Schema(
 
     // ✅ Legacy total stock — sizeStock এর sum রাখো (backward compat)
     stock: { type: Number, default: 0 },
+
+    // ✅ NEW: per-product delivery charge
+    // 0 দিলে global delivery charge ব্যবহার হবে
+    deliveryCharge: { type: Number, default: 0, min: 0 },
 
     sku: String,
     material: String,
@@ -129,8 +133,20 @@ const bannerSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// ============================================================
+// ✅ NEW: Settings schema (global delivery charge)
+// ============================================================
+const settingsSchema = new mongoose.Schema(
+  {
+    key: { type: String, unique: true, required: true },
+    globalDeliveryCharge: { type: Number, default: 80, min: 0 },
+  },
+  { timestamps: true },
+);
+
 export const User = mongoose.model("User", userSchema);
 export const Product = mongoose.model("Product", productSchema);
 export const Review = mongoose.model("Review", reviewSchema);
 export const Order = mongoose.model("Order", orderSchema);
 export const Banner = mongoose.model("Banner", bannerSchema);
+export const Settings = mongoose.model("Settings", settingsSchema); // ✅ NEW
