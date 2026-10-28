@@ -19,8 +19,7 @@ const demoProducts = [
     material: "Compact cotton",
     gsm: "220 GSM",
     tags: ["basic", "oversized", "everyday"],
-    // ✅ Zone-wise delivery (0 = global default use হবে)
-    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
+    deliveryCharges: { dhaka: 0, outside: 0 },
     active: true,
   },
   {
@@ -41,7 +40,7 @@ const demoProducts = [
     material: "Cotton",
     gsm: "220 GSM",
     tags: ["black", "oversized"],
-    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
+    deliveryCharges: { dhaka: 0, outside: 0 },
     active: true,
   },
   {
@@ -62,7 +61,7 @@ const demoProducts = [
     material: "Cotton blend",
     gsm: "220 GSM",
     tags: ["graphic", "weekend"],
-    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
+    deliveryCharges: { dhaka: 0, outside: 0 },
     active: true,
   },
   {
@@ -83,7 +82,7 @@ const demoProducts = [
     material: "Compact cotton",
     gsm: "220 GSM",
     tags: ["white", "minimal", "basic"],
-    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
+    deliveryCharges: { dhaka: 0, outside: 0 },
     active: true,
   },
   {
@@ -104,8 +103,8 @@ const demoProducts = [
     material: "Cotton",
     gsm: "230 GSM",
     tags: ["streetwear", "drop shoulder"],
-    // ✅ Premium product — zone-wise আলাদা delivery charge
-    deliveryCharges: { dhaka: 100, ashulia: 120, outside: 160 },
+    // Premium product — test example
+    deliveryCharges: { dhaka: 100, outside: 160 },
     active: true,
   },
   {
@@ -126,7 +125,7 @@ const demoProducts = [
     material: "Cotton",
     gsm: "220 GSM",
     tags: ["neutral", "oversized"],
-    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
+    deliveryCharges: { dhaka: 0, outside: 0 },
     active: true,
   },
   {
@@ -147,7 +146,7 @@ const demoProducts = [
     material: "Cotton",
     gsm: "220 GSM",
     tags: ["essential", "basic"],
-    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
+    deliveryCharges: { dhaka: 0, outside: 0 },
     active: true,
   },
   {
@@ -168,7 +167,7 @@ const demoProducts = [
     material: "Cotton blend",
     gsm: "220 GSM",
     tags: ["casual", "daily"],
-    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
+    deliveryCharges: { dhaka: 0, outside: 0 },
     active: true,
   },
 ];

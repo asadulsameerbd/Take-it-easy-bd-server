@@ -37,14 +37,14 @@ const productSchema = new mongoose.Schema(
     },
     stock: { type: Number, default: 0 },
 
-    // ✅ NEW: zone-wise delivery charge (per product)
+    // ✅ ২টা zone-এর per-product delivery charge
+    // 0 দিলে global default use হবে
     deliveryCharges: {
       dhaka: { type: Number, default: 0, min: 0 },
-      ashulia: { type: Number, default: 0, min: 0 },
       outside: { type: Number, default: 0, min: 0 },
     },
 
-    // ✅ Legacy single deliveryCharge (fallback — পুরনো doc-এর জন্য)
+    // ✅ Legacy single deliveryCharge (backward compat)
     deliveryCharge: { type: Number, default: 0, min: 0 },
 
     sku: String,
@@ -95,10 +95,10 @@ const orderSchema = new mongoose.Schema(
     subtotal: Number,
     deliveryCharge: Number,
 
-    // ✅ NEW: order-level delivery zone (historical record)
+    // ✅ ২টা zone
     deliveryZone: {
       type: String,
-      enum: ["dhaka", "ashulia", "outside"],
+      enum: ["dhaka", "outside"],
       default: "dhaka",
     },
 
@@ -142,15 +142,14 @@ const bannerSchema = new mongoose.Schema(
 );
 
 // ============================================================
-// ✅ Settings — global delivery charges (per zone)
+// ✅ Settings — global delivery charges (২টা zone)
 // ============================================================
 const settingsSchema = new mongoose.Schema(
   {
     key: { type: String, unique: true, required: true },
-    globalDeliveryCharge: { type: Number, default: 80, min: 0 }, // legacy fallback
+    globalDeliveryCharge: { type: Number, default: 80, min: 0 }, // legacy
     deliveryCharges: {
       dhaka: { type: Number, default: 60, min: 0 },
-      ashulia: { type: Number, default: 80, min: 0 },
       outside: { type: Number, default: 130, min: 0 },
     },
   },

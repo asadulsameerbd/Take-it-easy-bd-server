@@ -222,25 +222,20 @@ const buildReportFilter = (query) => {
 };
 
 // ============================================================
-// ✅ NEW: Zone detection — customer city → delivery zone
+// ✅ ২টা zone — customer choice বা city থেকে detect
 // ============================================================
-const detectDeliveryZone = (city, address = "") => {
-  const text = `${city || ""} ${address || ""}`.toLowerCase();
+const VALID_ZONES = ["dhaka", "outside"];
 
-  const ashuliaKeywords = [
-    "ashulia",
-    "আশুলিয়া",
-    "savar",
-    "সাভার",
-    "nobinagar",
-    "নবীনগর",
-    "baipayl",
-    "বাইপাইল",
-    "jamgora",
-    "জামগড়া",
-    "hemayetpur",
-    "হেমায়েতপুর",
-  ];
+const normalizeZone = (zone) => {
+  const z = String(zone || "")
+    .toLowerCase()
+    .trim();
+  if (z === "dhaka" || z === "inside" || z === "inside_dhaka") return "dhaka";
+  return "outside";
+};
+
+const detectDeliveryZoneFromCity = (city, address = "") => {
+  const text = `${city || ""} ${address || ""}`.toLowerCase();
 
   const dhakaKeywords = [
     "dhaka",
@@ -273,34 +268,27 @@ const detectDeliveryZone = (city, address = "") => {
     "বাড্ডা",
     "khilgaon",
     "খিলগাঁও",
+    "ashulia",
+    "আশুলিয়া",
+    "savar",
+    "সাভার",
   ];
 
-  if (ashuliaKeywords.some((k) => text.includes(k))) return "ashulia";
   if (dhakaKeywords.some((k) => text.includes(k))) return "dhaka";
   return "outside";
 };
 
-// ============================================================
-// ✅ NEW: Global delivery charges (per zone)
-// ============================================================
 const getGlobalDeliveryCharges = async () => {
   try {
     const s = await Settings.findOne({ key: "global" }).lean();
     const d = s?.deliveryCharges || {};
     return {
       dhaka: Math.max(0, Number(d.dhaka ?? 60)),
-      ashulia: Math.max(0, Number(d.ashulia ?? 80)),
       outside: Math.max(0, Number(d.outside ?? 130)),
     };
   } catch {
-    return { dhaka: 60, ashulia: 80, outside: 130 };
+    return { dhaka: 60, outside: 130 };
   }
-};
-
-// Legacy — single global delivery (backward compat)
-const getGlobalDelivery = async () => {
-  const charges = await getGlobalDeliveryCharges();
-  return charges.dhaka;
 };
 
 // --------------------
@@ -427,9 +415,7 @@ app.get(
   auth,
   wrap(async (req, res) => {
     const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found." });
-    }
+    if (!user) return res.status(404).json({ message: "User not found." });
     res.json({ user: clean(user) });
   }),
 );
@@ -464,9 +450,7 @@ app.patch(
       { new: true, runValidators: true },
     );
 
-    if (!user) {
-      return res.status(404).json({ message: "User not found." });
-    }
+    if (!user) return res.status(404).json({ message: "User not found." });
 
     res.json({ user: clean(user) });
   }),
@@ -505,7 +489,7 @@ app.post(
 );
 
 // ============================================================
-// ✅ Public — global delivery charges (per zone)
+// ✅ Public — global delivery charges (২টা zone)
 // ============================================================
 app.get(
   "/api/settings/delivery",
@@ -697,7 +681,7 @@ app.post(
 );
 
 // ============================================================
-// ✅ Admin settings (global delivery charges — per zone)
+// ✅ Admin settings (global delivery charges — ২টা zone)
 // ============================================================
 
 app.get(
@@ -708,7 +692,7 @@ app.get(
     if (!s) {
       s = await Settings.create({
         key: "global",
-        deliveryCharges: { dhaka: 60, ashulia: 80, outside: 130 },
+        deliveryCharges: { dhaka: 60, outside: 130 },
       });
     }
 
@@ -716,7 +700,6 @@ app.get(
     res.json({
       deliveryCharges: {
         dhaka: Math.max(0, Number(d.dhaka ?? 60)),
-        ashulia: Math.max(0, Number(d.ashulia ?? 80)),
         outside: Math.max(0, Number(d.outside ?? 130)),
       },
     });
@@ -729,19 +712,16 @@ app.patch(
   wrap(async (req, res) => {
     const body = req.body.deliveryCharges || {};
     const dhaka = Number(body.dhaka);
-    const ashulia = Number(body.ashulia);
     const outside = Number(body.outside);
 
     if (
       !Number.isFinite(dhaka) ||
-      !Number.isFinite(ashulia) ||
       !Number.isFinite(outside) ||
       dhaka < 0 ||
-      ashulia < 0 ||
       outside < 0
     ) {
       return res.status(400).json({
-        message: "Valid delivery charges required for all zones.",
+        message: "Valid delivery charges required for both zones.",
       });
     }
 
@@ -749,7 +729,7 @@ app.patch(
       { key: "global" },
       {
         $set: {
-          deliveryCharges: { dhaka, ashulia, outside },
+          deliveryCharges: { dhaka, outside },
           globalDeliveryCharge: dhaka,
         },
       },
@@ -760,7 +740,6 @@ app.patch(
     res.json({
       deliveryCharges: {
         dhaka: Math.max(0, Number(d.dhaka ?? 60)),
-        ashulia: Math.max(0, Number(d.ashulia ?? 80)),
         outside: Math.max(0, Number(d.outside ?? 130)),
       },
     });
@@ -780,7 +759,7 @@ app.get(
   }),
 );
 
-// ✅ POST — sizeStock + cost + zone-wise deliveryCharges
+// ✅ POST — ২টা zone delivery charges
 app.post(
   "/api/admin/products",
   admin,
@@ -805,11 +784,9 @@ app.post(
       ? sumSizeStock(sizeStock)
       : Math.max(0, Number(body.stock || 0));
 
-    // ✅ Zone-wise delivery charge
     const dc = body.deliveryCharges || {};
     const deliveryCharges = {
       dhaka: Math.max(0, Number(dc.dhaka || 0)),
-      ashulia: Math.max(0, Number(dc.ashulia || 0)),
       outside: Math.max(0, Number(dc.outside || 0)),
     };
 
@@ -825,7 +802,7 @@ app.post(
         Math.min(90, Number(body.discountPercent || 0)),
       ),
       deliveryCharges,
-      deliveryCharge: 0, // legacy field
+      deliveryCharge: 0,
       category: body.category || "Clothing",
       images: Array.isArray(body.images) ? body.images : [],
       sizes,
@@ -843,7 +820,7 @@ app.post(
   }),
 );
 
-// ✅ PATCH — zone-wise deliveryCharges
+// ✅ PATCH — ২টা zone delivery charges
 app.patch(
   "/api/admin/products/:id",
   admin,
@@ -882,12 +859,10 @@ app.patch(
     for (const field of allowedFields) {
       if (req.body[field] === undefined) continue;
 
-      // ✅ Zone-wise delivery charges
       if (field === "deliveryCharges") {
         const raw = req.body.deliveryCharges || {};
         update.deliveryCharges = {
           dhaka: Math.max(0, Number(raw.dhaka || 0)),
-          ashulia: Math.max(0, Number(raw.ashulia || 0)),
           outside: Math.max(0, Number(raw.outside || 0)),
         };
         continue;
@@ -1071,7 +1046,7 @@ app.delete(
 );
 
 // --------------------
-// ✅ Create an order — zone-aware delivery
+// ✅ Create an order — ২টা zone
 // --------------------
 
 app.post(
@@ -1178,10 +1153,14 @@ app.post(
     );
 
     // ============================================================
-    // ✅ Zone-aware delivery computation
-    // Priority: product-specific zone charge > global zone charge
+    // ✅ ২টা zone delivery — customer choice অথবা city থেকে detect
+    // Priority: product zone charge > global zone charge
     // ============================================================
-    const zone = detectDeliveryZone(body.city, body.address);
+    const bodyZone = String(body.deliveryZone || "").trim();
+    const zone = VALID_ZONES.includes(bodyZone)
+      ? bodyZone
+      : detectDeliveryZoneFromCity(body.city, body.address);
+
     const globalCharges = await getGlobalDeliveryCharges();
 
     const productZoneCharges = products
@@ -1212,7 +1191,7 @@ app.post(
         userId = decoded.sub;
       }
     } catch {
-      // Guest checkout allowed
+      // Guest checkout
     }
 
     const order = await Order.create({
@@ -1244,11 +1223,7 @@ app.post(
       rocket: "Rocket",
     };
 
-    const zoneLabels = {
-      dhaka: "Inside Dhaka",
-      ashulia: "Near Ashulia",
-      outside: "Outside Dhaka",
-    };
+    const zoneLabels = { dhaka: "Inside Dhaka", outside: "Outside Dhaka" };
 
     const itemList = items
       .map((item, index) => {
@@ -1540,7 +1515,7 @@ app.patch(
 );
 
 // ============================================================
-// Admin — Delete an order (permanent)
+// Admin — Delete an order
 // ============================================================
 app.delete(
   "/api/admin/orders/:id",
