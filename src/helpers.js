@@ -57,7 +57,7 @@ export const slugify = (s) =>
     .replace(/^-|-$/g, "") || `product-${Date.now()}`;
 
 /* ============================================================ */
-/* ✅ Cloudinary Upload — replaces imgBB()                      */
+/* ✅ Cloudinary Upload — Buffer/Stream based (ENAMETOOLONG fix) */
 /* ============================================================ */
 export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
   if (!dataUrl) {
@@ -75,15 +75,47 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
   }
 
   try {
-    const result = await cloudinary.uploader.upload(dataUrl, {
-      folder,
-      resource_type: "image",
-      transformation: [{ quality: "auto:good", fetch_format: "auto" }],
+    let buffer;
+
+    // ✅ Handle data URL, raw base64 string, or Buffer
+    if (typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
+      const base64Data = dataUrl.replace(/^data:[^;]+;base64,/, "");
+      buffer = Buffer.from(base64Data, "base64");
+    } else if (typeof dataUrl === "string") {
+      buffer = Buffer.from(dataUrl, "base64");
+    } else if (Buffer.isBuffer(dataUrl)) {
+      buffer = dataUrl;
+    } else {
+      throw new Error("Invalid image data format.");
+    }
+
+    if (!buffer || buffer.length === 0) {
+      throw new Error("Empty image data.");
+    }
+
+    // ✅ Use upload_stream to avoid ENAMETOOLONG
+    const result = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder,
+          resource_type: "image",
+          transformation: [{ quality: "auto:good", fetch_format: "auto" }],
+        },
+        (error, uploadResult) => {
+          if (error) return reject(error);
+          return resolve(uploadResult);
+        },
+      );
+
+      stream.end(buffer);
     });
 
     return result.secure_url;
   } catch (error) {
-    console.error("Cloudinary upload error:", error);
+    console.error("Cloudinary upload error:", {
+      message: error?.message,
+      http_code: error?.http_code,
+    });
     throw new Error(
       error?.message || "Cloudinary upload failed. Please try again.",
     );
