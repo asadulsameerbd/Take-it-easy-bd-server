@@ -1,4 +1,13 @@
 import jwt from "jsonwebtoken";
+import { v2 as cloudinary } from "cloudinary";
+
+// ✅ Cloudinary configure
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure: true,
+});
 
 export const tokenFor = (user) =>
   jwt.sign(
@@ -47,35 +56,42 @@ export const slugify = (s) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "") || `product-${Date.now()}`;
 
-export async function imgBB(dataUrl) {
+/* ============================================================ */
+/* ✅ Cloudinary Upload — replaces imgBB()                      */
+/* ============================================================ */
+export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
   if (!dataUrl) {
     throw new Error("Image is required.");
   }
 
-  if (!process.env.IMGBB_API_KEY) {
-    throw new Error("Set IMGBB_API_KEY in server .env");
+  if (
+    !process.env.CLOUDINARY_CLOUD_NAME ||
+    !process.env.CLOUDINARY_API_KEY ||
+    !process.env.CLOUDINARY_API_SECRET
+  ) {
+    throw new Error(
+      "Cloudinary credentials missing in server .env (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET)",
+    );
   }
 
-  const image = String(dataUrl).replace(/^data:image\/\w+;base64,/, "");
+  try {
+    const result = await cloudinary.uploader.upload(dataUrl, {
+      folder,
+      resource_type: "image",
+      transformation: [{ quality: "auto:good", fetch_format: "auto" }],
+    });
 
-  const body = new URLSearchParams({ image });
-
-  const r = await fetch(
-    `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`,
-    {
-      method: "POST",
-      body,
-    },
-  );
-
-  const j = await r.json();
-
-  if (!r.ok || !j.success) {
-    throw new Error(j.error?.message || "ImgBB upload failed");
+    return result.secure_url;
+  } catch (error) {
+    console.error("Cloudinary upload error:", error);
+    throw new Error(
+      error?.message || "Cloudinary upload failed. Please try again.",
+    );
   }
-
-  return j.data.url;
 }
+
+// ✅ Backward compat — পুরনো imgBB() call-ও কাজ করবে
+export const imgBB = uploadToCloudinary;
 
 export async function telegram(message) {
   const token = process.env.TELEGRAM_BOT_TOKEN;

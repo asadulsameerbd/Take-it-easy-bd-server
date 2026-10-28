@@ -7,7 +7,14 @@ import jwt from "jsonwebtoken";
 import { EventEmitter } from "events";
 
 import { User, Product, Review, Order, Banner } from "./models.js";
-import { tokenFor, auth, admin, slugify, imgBB, telegram } from "./helpers.js";
+import {
+  tokenFor,
+  auth,
+  admin,
+  slugify,
+  uploadToCloudinary,
+  telegram,
+} from "./helpers.js";
 import { seedDemoData } from "./seed.js";
 
 const app = express();
@@ -580,9 +587,10 @@ app.get(
 );
 
 // --------------------
-// Image uploads
+// ✅ Image uploads — Cloudinary
 // --------------------
 
+// Banner (single)
 app.post(
   "/api/uploads/image",
   admin,
@@ -593,12 +601,16 @@ app.post(
       });
     }
 
-    const imageUrl = await imgBB(req.body.imageData);
+    const imageUrl = await uploadToCloudinary(
+      req.body.imageData,
+      "take-it-easy/banners",
+    );
 
     res.status(201).json({ imageUrl });
   }),
 );
 
+// Product images (multiple)
 app.post(
   "/api/uploads/images",
   admin,
@@ -618,13 +630,16 @@ app.post(
     }
 
     const imageUrls = await Promise.all(
-      images.map((imageData) => imgBB(imageData)),
+      images.map((imageData) =>
+        uploadToCloudinary(imageData, "take-it-easy/products"),
+      ),
     );
 
     res.status(201).json({ imageUrls });
   }),
 );
 
+// Payment proof (public)
 app.post(
   "/api/public/payment-proof",
   wrap(async (req, res) => {
@@ -634,7 +649,10 @@ app.post(
       });
     }
 
-    const imageUrl = await imgBB(req.body.imageData);
+    const imageUrl = await uploadToCloudinary(
+      req.body.imageData,
+      "take-it-easy/payments",
+    );
 
     res.status(201).json({ imageUrl });
   }),
@@ -686,7 +704,7 @@ app.post(
       slug: `${slugify(body.title)}-${Date.now().toString(36)}`,
       description: body.description || "",
       price,
-      cost: Math.max(0, Number(body.cost || 0)), // ✅ NEW
+      cost: Math.max(0, Number(body.cost || 0)),
       compareAtPrice: Number(body.compareAtPrice || 0),
       discountPercent: Math.max(
         0,
@@ -1412,7 +1430,6 @@ app.get(
     const orders = await Order.find(filter).lean();
     const products = await Product.find().lean();
 
-    // productId → cost map
     const costMap = new Map();
     for (const p of products) {
       costMap.set(String(p._id), Number(p.cost || 0));
