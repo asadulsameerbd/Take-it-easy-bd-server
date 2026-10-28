@@ -19,7 +19,8 @@ const demoProducts = [
     material: "Compact cotton",
     gsm: "220 GSM",
     tags: ["basic", "oversized", "everyday"],
-    deliveryCharge: 0, // ✅ 0 = global default use হবে
+    // ✅ Zone-wise delivery (0 = global default use হবে)
+    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
     active: true,
   },
   {
@@ -40,7 +41,7 @@ const demoProducts = [
     material: "Cotton",
     gsm: "220 GSM",
     tags: ["black", "oversized"],
-    deliveryCharge: 0,
+    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
     active: true,
   },
   {
@@ -61,7 +62,7 @@ const demoProducts = [
     material: "Cotton blend",
     gsm: "220 GSM",
     tags: ["graphic", "weekend"],
-    deliveryCharge: 0,
+    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
     active: true,
   },
   {
@@ -82,7 +83,7 @@ const demoProducts = [
     material: "Compact cotton",
     gsm: "220 GSM",
     tags: ["white", "minimal", "basic"],
-    deliveryCharge: 0,
+    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
     active: true,
   },
   {
@@ -103,8 +104,8 @@ const demoProducts = [
     material: "Cotton",
     gsm: "230 GSM",
     tags: ["streetwear", "drop shoulder"],
-    // ✅ Premium product — আলাদা delivery charge
-    deliveryCharge: 130,
+    // ✅ Premium product — zone-wise আলাদা delivery charge
+    deliveryCharges: { dhaka: 100, ashulia: 120, outside: 160 },
     active: true,
   },
   {
@@ -125,7 +126,7 @@ const demoProducts = [
     material: "Cotton",
     gsm: "220 GSM",
     tags: ["neutral", "oversized"],
-    deliveryCharge: 0,
+    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
     active: true,
   },
   {
@@ -146,7 +147,7 @@ const demoProducts = [
     material: "Cotton",
     gsm: "220 GSM",
     tags: ["essential", "basic"],
-    deliveryCharge: 0,
+    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
     active: true,
   },
   {
@@ -167,7 +168,7 @@ const demoProducts = [
     material: "Cotton blend",
     gsm: "220 GSM",
     tags: ["casual", "daily"],
-    deliveryCharge: 0,
+    deliveryCharges: { dhaka: 0, ashulia: 0, outside: 0 },
     active: true,
   },
 ];

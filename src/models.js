@@ -22,10 +22,7 @@ const productSchema = new mongoose.Schema(
     slug: { type: String, required: true, unique: true },
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
-
-    // ✅ কেনার দাম (profit/loss হিসাবের জন্য)
     cost: { type: Number, default: 0, min: 0 },
-
     compareAtPrice: { type: Number, default: 0 },
     discountPercent: { type: Number, default: 0, min: 0, max: 90 },
     category: { type: String, default: "Clothing" },
@@ -33,18 +30,21 @@ const productSchema = new mongoose.Schema(
     sizes: [String],
     colors: [String],
 
-    // ✅ per-size stock — { M: 10, L: 0, XL: 5 }
     sizeStock: {
       type: Map,
       of: Number,
       default: () => new Map(),
     },
-
-    // ✅ Legacy total stock — sizeStock এর sum রাখো (backward compat)
     stock: { type: Number, default: 0 },
 
-    // ✅ NEW: per-product delivery charge
-    // 0 দিলে global delivery charge ব্যবহার হবে
+    // ✅ NEW: zone-wise delivery charge (per product)
+    deliveryCharges: {
+      dhaka: { type: Number, default: 0, min: 0 },
+      ashulia: { type: Number, default: 0, min: 0 },
+      outside: { type: Number, default: 0, min: 0 },
+    },
+
+    // ✅ Legacy single deliveryCharge (fallback — পুরনো doc-এর জন্য)
     deliveryCharge: { type: Number, default: 0, min: 0 },
 
     sku: String,
@@ -94,6 +94,14 @@ const orderSchema = new mongoose.Schema(
     ],
     subtotal: Number,
     deliveryCharge: Number,
+
+    // ✅ NEW: order-level delivery zone (historical record)
+    deliveryZone: {
+      type: String,
+      enum: ["dhaka", "ashulia", "outside"],
+      default: "dhaka",
+    },
+
     total: Number,
     paymentMethod: { type: String, enum: ["cod", "bkash", "nagad", "rocket"] },
     paymentNumber: { type: String, default: "01933200699" },
@@ -134,12 +142,17 @@ const bannerSchema = new mongoose.Schema(
 );
 
 // ============================================================
-// ✅ NEW: Settings schema (global delivery charge)
+// ✅ Settings — global delivery charges (per zone)
 // ============================================================
 const settingsSchema = new mongoose.Schema(
   {
     key: { type: String, unique: true, required: true },
-    globalDeliveryCharge: { type: Number, default: 80, min: 0 },
+    globalDeliveryCharge: { type: Number, default: 80, min: 0 }, // legacy fallback
+    deliveryCharges: {
+      dhaka: { type: Number, default: 60, min: 0 },
+      ashulia: { type: Number, default: 80, min: 0 },
+      outside: { type: Number, default: 130, min: 0 },
+    },
   },
   { timestamps: true },
 );
@@ -149,4 +162,4 @@ export const Product = mongoose.model("Product", productSchema);
 export const Review = mongoose.model("Review", reviewSchema);
 export const Order = mongoose.model("Order", orderSchema);
 export const Banner = mongoose.model("Banner", bannerSchema);
-export const Settings = mongoose.model("Settings", settingsSchema); // ✅ NEW
+export const Settings = mongoose.model("Settings", settingsSchema);

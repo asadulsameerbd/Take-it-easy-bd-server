@@ -36,7 +36,6 @@ app.use(
       if (!origin || allowedOrigins.includes(origin.replace(/\/+$/, ""))) {
         return callback(null, true);
       }
-
       return callback(new Error("Origin not allowed by CORS."));
     },
   }),
@@ -45,7 +44,6 @@ app.use(
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
-// ✅ Cache GET requests for faster repeat visits
 app.use((req, res, next) => {
   if (req.method === "GET") {
     res.set("Cache-Control", "public, max-age=60, s-maxage=120");
@@ -61,9 +59,7 @@ let connectionPromise = null;
 let seedPromise = null;
 
 async function connectDatabase() {
-  if (mongoose.connection.readyState === 1) {
-    return;
-  }
+  if (mongoose.connection.readyState === 1) return;
 
   if (mongoose.connection.readyState === 2 && connectionPromise) {
     await connectionPromise;
@@ -109,7 +105,6 @@ async function initializeDatabase() {
   await seedPromise;
 }
 
-// All API requests initialize the database before reaching routes.
 app.use((req, res, next) => {
   initializeDatabase()
     .then(() => next())
@@ -135,10 +130,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/api", (_req, res) => {
-  res.json({
-    name: "Take It Easy API",
-    status: "running",
-  });
+  res.json({ name: "Take It Easy API", status: "running" });
 });
 
 app.get("/api/health", (_req, res) => {
@@ -183,7 +175,6 @@ const clean = (user) => ({
   phone: user.phone,
 });
 
-// ✅ sizeStock helpers — Map বা plain object দুটোই handle
 const normalizeSizeStock = (raw) => {
   if (!raw) return {};
   if (raw instanceof Map) return Object.fromEntries(raw);
@@ -202,7 +193,6 @@ const buildSizeStock = (sizes, rawSizeStock) => {
 const sumSizeStock = (sizeStock) =>
   Object.values(sizeStock).reduce((a, b) => a + Number(b || 0), 0);
 
-// ✅ Reports helper — date + status filter থেকে Mongo filter তৈরি
 const buildReportFilter = (query) => {
   const filter = {};
 
@@ -231,15 +221,86 @@ const buildReportFilter = (query) => {
   return filter;
 };
 
-// ✅ Global delivery helper — Settings থেকে global value বের করা
-const getGlobalDelivery = async () => {
+// ============================================================
+// ✅ NEW: Zone detection — customer city → delivery zone
+// ============================================================
+const detectDeliveryZone = (city, address = "") => {
+  const text = `${city || ""} ${address || ""}`.toLowerCase();
+
+  const ashuliaKeywords = [
+    "ashulia",
+    "আশুলিয়া",
+    "savar",
+    "সাভার",
+    "nobinagar",
+    "নবীনগর",
+    "baipayl",
+    "বাইপাইল",
+    "jamgora",
+    "জামগড়া",
+    "hemayetpur",
+    "হেমায়েতপুর",
+  ];
+
+  const dhakaKeywords = [
+    "dhaka",
+    "ঢাকা",
+    "dhanmondi",
+    "ধানমন্ডি",
+    "mirpur",
+    "মিরপুর",
+    "uttara",
+    "উত্তরা",
+    "gulshan",
+    "গুলশান",
+    "banani",
+    "বনানী",
+    "motijheel",
+    "মতিঝিল",
+    "gazipur",
+    "গাজীপুর",
+    "narayanganj",
+    "নারায়ণগঞ্জ",
+    "tongi",
+    "টঙ্গী",
+    "keraniganj",
+    "কেরানীগঞ্জ",
+    "tejgaon",
+    "তেজগাঁও",
+    "mohammadpur",
+    "মোহাম্মদপুর",
+    "badda",
+    "বাড্ডা",
+    "khilgaon",
+    "খিলগাঁও",
+  ];
+
+  if (ashuliaKeywords.some((k) => text.includes(k))) return "ashulia";
+  if (dhakaKeywords.some((k) => text.includes(k))) return "dhaka";
+  return "outside";
+};
+
+// ============================================================
+// ✅ NEW: Global delivery charges (per zone)
+// ============================================================
+const getGlobalDeliveryCharges = async () => {
   try {
     const s = await Settings.findOne({ key: "global" }).lean();
-    const val = Number(s?.globalDeliveryCharge);
-    return Number.isFinite(val) && val >= 0 ? val : 80;
+    const d = s?.deliveryCharges || {};
+    return {
+      dhaka: Math.max(0, Number(d.dhaka ?? 60)),
+      ashulia: Math.max(0, Number(d.ashulia ?? 80)),
+      outside: Math.max(0, Number(d.outside ?? 130)),
+    };
   } catch {
-    return 80;
+    return { dhaka: 60, ashulia: 80, outside: 130 };
   }
+};
+
+// Legacy — single global delivery (backward compat)
+const getGlobalDelivery = async () => {
+  const charges = await getGlobalDeliveryCharges();
+  return charges.dhaka;
 };
 
 // --------------------
@@ -322,13 +383,10 @@ app.post(
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-
     const existingUser = await User.findOne({ email: normalizedEmail });
 
     if (existingUser) {
-      return res.status(409).json({
-        message: "Email already registered.",
-      });
+      return res.status(409).json({ message: "Email already registered." });
     }
 
     const user = await User.create({
@@ -351,22 +409,16 @@ app.post(
     const email = String(req.body.email || "")
       .trim()
       .toLowerCase();
-
     const user = await User.findOne({ email });
 
     if (
       !user ||
       !(await bcrypt.compare(req.body.password || "", user.passwordHash))
     ) {
-      return res.status(401).json({
-        message: "Email or password incorrect.",
-      });
+      return res.status(401).json({ message: "Email or password incorrect." });
     }
 
-    res.json({
-      token: tokenFor(user),
-      user: clean(user),
-    });
+    res.json({ token: tokenFor(user), user: clean(user) });
   }),
 );
 
@@ -375,13 +427,9 @@ app.get(
   auth,
   wrap(async (req, res) => {
     const user = await User.findById(req.userId);
-
     if (!user) {
-      return res.status(404).json({
-        message: "User not found.",
-      });
+      return res.status(404).json({ message: "User not found." });
     }
-
     res.json({ user: clean(user) });
   }),
 );
@@ -393,22 +441,17 @@ app.patch(
     const { name, email, phone = "" } = req.body;
 
     if (!name?.trim() || !email?.trim()) {
-      return res.status(400).json({
-        message: "Name and email required.",
-      });
+      return res.status(400).json({ message: "Name and email required." });
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-
     const existingUser = await User.findOne({
       email: normalizedEmail,
       _id: { $ne: req.userId },
     });
 
     if (existingUser) {
-      return res.status(409).json({
-        message: "Email already in use.",
-      });
+      return res.status(409).json({ message: "Email already in use." });
     }
 
     const user = await User.findByIdAndUpdate(
@@ -418,16 +461,11 @@ app.patch(
         email: normalizedEmail,
         phone: String(phone).trim(),
       },
-      {
-        new: true,
-        runValidators: true,
-      },
+      { new: true, runValidators: true },
     );
 
     if (!user) {
-      return res.status(404).json({
-        message: "User not found.",
-      });
+      return res.status(404).json({ message: "User not found." });
     }
 
     res.json({ user: clean(user) });
@@ -444,42 +482,36 @@ app.post(
     const email = String(req.body.email || "")
       .trim()
       .toLowerCase();
-
     const adminEmail = String(process.env.ADMIN_EMAIL || "")
       .trim()
       .toLowerCase();
-
     const adminPassword = process.env.ADMIN_PASSWORD;
     const jwtSecret = process.env.JWT_SECRET;
 
     if (!adminEmail || !adminPassword || !jwtSecret) {
       console.error("Admin login environment variables are missing.");
-
-      return res.status(500).json({
-        message: "Admin login is not configured.",
-      });
+      return res
+        .status(500)
+        .json({ message: "Admin login is not configured." });
     }
 
     if (email !== adminEmail || req.body.password !== adminPassword) {
-      return res.status(401).json({
-        message: "Invalid admin credentials.",
-      });
+      return res.status(401).json({ message: "Invalid admin credentials." });
     }
 
     const token = jwt.sign({ role: "admin" }, jwtSecret, { expiresIn: "12h" });
-
     res.json({ token });
   }),
 );
 
 // ============================================================
-// ✅ Public — global delivery charge (checkout fallback)
+// ✅ Public — global delivery charges (per zone)
 // ============================================================
 app.get(
   "/api/settings/delivery",
   wrap(async (_req, res) => {
-    const deliveryCharge = await getGlobalDelivery();
-    res.json({ deliveryCharge });
+    const deliveryCharges = await getGlobalDeliveryCharges();
+    res.json({ deliveryCharges });
   }),
 );
 
@@ -495,7 +527,6 @@ app.get(
 
     if (query) {
       const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
       filter.$or = [
         { title: { $regex: safeQuery, $options: "i" } },
         { description: { $regex: safeQuery, $options: "i" } },
@@ -530,14 +561,10 @@ app.get(
     }).lean();
 
     if (!product) {
-      return res.status(404).json({
-        message: "Product not found.",
-      });
+      return res.status(404).json({ message: "Product not found." });
     }
 
-    const reviews = await Review.find({
-      product: product._id,
-    })
+    const reviews = await Review.find({ product: product._id })
       .sort({ createdAt: -1 })
       .lean();
 
@@ -557,9 +584,7 @@ app.post(
     const comment = String(req.body.comment || "").trim();
 
     if (!Number.isInteger(rating) || rating < 1 || rating > 5 || !comment) {
-      return res.status(400).json({
-        message: "Rating and review required.",
-      });
+      return res.status(400).json({ message: "Rating and review required." });
     }
 
     const [product, user] = await Promise.all([
@@ -604,36 +629,29 @@ app.get(
     const banners = await Banner.find({ active: true })
       .sort({ sortOrder: 1, createdAt: -1 })
       .lean();
-
     res.json(banners);
   }),
 );
 
 // --------------------
-// ✅ Image uploads — Cloudinary
+// Image uploads — Cloudinary
 // --------------------
 
-// Banner (single)
 app.post(
   "/api/uploads/image",
   admin,
   wrap(async (req, res) => {
     if (!req.body.imageData) {
-      return res.status(400).json({
-        message: "Image data is required.",
-      });
+      return res.status(400).json({ message: "Image data is required." });
     }
-
     const imageUrl = await uploadToCloudinary(
       req.body.imageData,
       "take-it-easy/banners",
     );
-
     res.status(201).json({ imageUrl });
   }),
 );
 
-// Product images (multiple)
 app.post(
   "/api/uploads/images",
   admin,
@@ -641,15 +659,13 @@ app.post(
     const images = req.body.images;
 
     if (!Array.isArray(images) || images.length === 0) {
-      return res.status(400).json({
-        message: "Images array is required.",
-      });
+      return res.status(400).json({ message: "Images array is required." });
     }
 
     if (images.length > 10) {
-      return res.status(400).json({
-        message: "Maximum 10 images per request.",
-      });
+      return res
+        .status(400)
+        .json({ message: "Maximum 10 images per request." });
     }
 
     const imageUrls = await Promise.all(
@@ -662,14 +678,13 @@ app.post(
   }),
 );
 
-// Payment proof (public)
 app.post(
   "/api/public/payment-proof",
   wrap(async (req, res) => {
     if (!req.body.imageData) {
-      return res.status(400).json({
-        message: "Payment screenshot is required.",
-      });
+      return res
+        .status(400)
+        .json({ message: "Payment screenshot is required." });
     }
 
     const imageUrl = await uploadToCloudinary(
@@ -681,9 +696,9 @@ app.post(
   }),
 );
 
-// --------------------
-// Admin settings (global delivery charge)
-// --------------------
+// ============================================================
+// ✅ Admin settings (global delivery charges — per zone)
+// ============================================================
 
 app.get(
   "/api/admin/settings",
@@ -691,11 +706,19 @@ app.get(
   wrap(async (_req, res) => {
     let s = await Settings.findOne({ key: "global" });
     if (!s) {
-      s = await Settings.create({ key: "global", globalDeliveryCharge: 80 });
+      s = await Settings.create({
+        key: "global",
+        deliveryCharges: { dhaka: 60, ashulia: 80, outside: 130 },
+      });
     }
 
+    const d = s.deliveryCharges || {};
     res.json({
-      globalDeliveryCharge: Math.max(0, Number(s.globalDeliveryCharge ?? 80)),
+      deliveryCharges: {
+        dhaka: Math.max(0, Number(d.dhaka ?? 60)),
+        ashulia: Math.max(0, Number(d.ashulia ?? 80)),
+        outside: Math.max(0, Number(d.outside ?? 130)),
+      },
     });
   }),
 );
@@ -704,22 +727,42 @@ app.patch(
   "/api/admin/settings",
   admin,
   wrap(async (req, res) => {
-    const val = Number(req.body.globalDeliveryCharge);
+    const body = req.body.deliveryCharges || {};
+    const dhaka = Number(body.dhaka);
+    const ashulia = Number(body.ashulia);
+    const outside = Number(body.outside);
 
-    if (!Number.isFinite(val) || val < 0) {
+    if (
+      !Number.isFinite(dhaka) ||
+      !Number.isFinite(ashulia) ||
+      !Number.isFinite(outside) ||
+      dhaka < 0 ||
+      ashulia < 0 ||
+      outside < 0
+    ) {
       return res.status(400).json({
-        message: "Valid delivery charge required.",
+        message: "Valid delivery charges required for all zones.",
       });
     }
 
     const s = await Settings.findOneAndUpdate(
       { key: "global" },
-      { $set: { globalDeliveryCharge: val } },
+      {
+        $set: {
+          deliveryCharges: { dhaka, ashulia, outside },
+          globalDeliveryCharge: dhaka,
+        },
+      },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
 
+    const d = s.deliveryCharges || {};
     res.json({
-      globalDeliveryCharge: Math.max(0, Number(s.globalDeliveryCharge ?? 80)),
+      deliveryCharges: {
+        dhaka: Math.max(0, Number(d.dhaka ?? 60)),
+        ashulia: Math.max(0, Number(d.ashulia ?? 80)),
+        outside: Math.max(0, Number(d.outside ?? 130)),
+      },
     });
   }),
 );
@@ -733,12 +776,11 @@ app.get(
   admin,
   wrap(async (_req, res) => {
     const products = await Product.find().sort({ createdAt: -1 }).lean();
-
     res.json(products);
   }),
 );
 
-// ✅ POST — sizeStock + cost + deliveryCharge support
+// ✅ POST — sizeStock + cost + zone-wise deliveryCharges
 app.post(
   "/api/admin/products",
   admin,
@@ -752,7 +794,6 @@ app.post(
       });
     }
 
-    // ✅ sizeStock normalize
     const sizes = Array.isArray(body.sizes) ? body.sizes : [];
     const rawSizeStock =
       body.sizeStock && typeof body.sizeStock === "object"
@@ -760,10 +801,17 @@ app.post(
         : {};
     const sizeStock = buildSizeStock(sizes, rawSizeStock);
 
-    // total stock = sizeStock sum (fallback: body.stock)
     const totalStock = sizes.length
       ? sumSizeStock(sizeStock)
       : Math.max(0, Number(body.stock || 0));
+
+    // ✅ Zone-wise delivery charge
+    const dc = body.deliveryCharges || {};
+    const deliveryCharges = {
+      dhaka: Math.max(0, Number(dc.dhaka || 0)),
+      ashulia: Math.max(0, Number(dc.ashulia || 0)),
+      outside: Math.max(0, Number(dc.outside || 0)),
+    };
 
     const product = await Product.create({
       title: body.title.trim(),
@@ -776,8 +824,8 @@ app.post(
         0,
         Math.min(90, Number(body.discountPercent || 0)),
       ),
-      // ✅ NEW: per-product delivery charge
-      deliveryCharge: Math.max(0, Number(body.deliveryCharge || 0)),
+      deliveryCharges,
+      deliveryCharge: 0, // legacy field
       category: body.category || "Clothing",
       images: Array.isArray(body.images) ? body.images : [],
       sizes,
@@ -795,15 +843,13 @@ app.post(
   }),
 );
 
-// ✅ PATCH — sizeStock + cost + deliveryCharge update support
+// ✅ PATCH — zone-wise deliveryCharges
 app.patch(
   "/api/admin/products/:id",
   admin,
   wrap(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        message: "Invalid product ID.",
-      });
+      return res.status(400).json({ message: "Invalid product ID." });
     }
 
     const existing = await Product.findById(req.params.id);
@@ -818,7 +864,8 @@ app.patch(
       "cost",
       "compareAtPrice",
       "discountPercent",
-      "deliveryCharge", // ✅ NEW
+      "deliveryCharges",
+      "deliveryCharge",
       "category",
       "images",
       "sizes",
@@ -834,6 +881,17 @@ app.patch(
 
     for (const field of allowedFields) {
       if (req.body[field] === undefined) continue;
+
+      // ✅ Zone-wise delivery charges
+      if (field === "deliveryCharges") {
+        const raw = req.body.deliveryCharges || {};
+        update.deliveryCharges = {
+          dhaka: Math.max(0, Number(raw.dhaka || 0)),
+          ashulia: Math.max(0, Number(raw.ashulia || 0)),
+          outside: Math.max(0, Number(raw.outside || 0)),
+        };
+        continue;
+      }
 
       if (
         [
@@ -877,7 +935,6 @@ app.patch(
       update.slug = `${slugify(update.title)}-${Date.now().toString(36)}`;
     }
 
-    // ✅ sizeStock + total stock handle
     const nextSizes =
       update.sizes !== undefined ? update.sizes : existing.sizes || [];
 
@@ -888,7 +945,6 @@ app.patch(
       const prevSizeStock = normalizeSizeStock(existing.sizeStock);
       const rawSizeStock =
         req.body.sizeStock !== undefined ? req.body.sizeStock : prevSizeStock;
-
       const nextSizeStock = buildSizeStock(nextSizes, rawSizeStock);
 
       update.sizeStock = nextSizeStock;
@@ -913,21 +969,16 @@ app.delete(
   admin,
   wrap(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        message: "Invalid product ID.",
-      });
+      return res.status(400).json({ message: "Invalid product ID." });
     }
 
     const product = await Product.findByIdAndDelete(req.params.id);
 
     if (!product) {
-      return res.status(404).json({
-        message: "Product not found.",
-      });
+      return res.status(404).json({ message: "Product not found." });
     }
 
     await Review.deleteMany({ product: product._id });
-
     res.json({ message: "Product deleted." });
   }),
 );
@@ -941,7 +992,6 @@ app.get(
   admin,
   wrap(async (_req, res) => {
     const banners = await Banner.find().sort({ sortOrder: 1 }).lean();
-
     res.json(banners);
   }),
 );
@@ -951,11 +1001,8 @@ app.post(
   admin,
   wrap(async (req, res) => {
     const body = req.body;
-
     if (!body.imageUrl) {
-      return res.status(400).json({
-        message: "Banner image required.",
-      });
+      return res.status(400).json({ message: "Banner image required." });
     }
 
     const banner = await Banner.create({
@@ -972,9 +1019,7 @@ app.patch(
   admin,
   wrap(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        message: "Invalid banner ID.",
-      });
+      return res.status(400).json({ message: "Invalid banner ID." });
     }
 
     const allowedFields = [
@@ -1001,9 +1046,7 @@ app.patch(
     });
 
     if (!banner) {
-      return res.status(404).json({
-        message: "Banner not found.",
-      });
+      return res.status(404).json({ message: "Banner not found." });
     }
 
     res.json(banner);
@@ -1015,17 +1058,12 @@ app.delete(
   admin,
   wrap(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        message: "Invalid banner ID.",
-      });
+      return res.status(400).json({ message: "Invalid banner ID." });
     }
 
     const banner = await Banner.findByIdAndDelete(req.params.id);
-
     if (!banner) {
-      return res.status(404).json({
-        message: "Banner not found.",
-      });
+      return res.status(404).json({ message: "Banner not found." });
     }
 
     res.json({ message: "Banner deleted." });
@@ -1033,7 +1071,7 @@ app.delete(
 );
 
 // --------------------
-// ✅ Create an order — size-wise stock check + delivery recompute
+// ✅ Create an order — zone-aware delivery
 // --------------------
 
 app.post(
@@ -1080,7 +1118,6 @@ app.post(
 
     const items = [];
 
-    // ✅ প্রতিটা item validate + size stock check
     for (const item of body.items) {
       const product = productMap.get(String(item.productId));
 
@@ -1093,14 +1130,11 @@ app.post(
       const quantity = Number(item.quantity || 1);
 
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
-        return res.status(400).json({
-          message: "Invalid product quantity.",
-        });
+        return res.status(400).json({ message: "Invalid product quantity." });
       }
 
       const size = String(item.size || "");
 
-      // ✅ size-wise stock check (Map থেকে)
       if (size && product.sizeStock?.get(size) !== undefined) {
         const available = product.sizeStock.get(size) || 0;
         if (available < quantity) {
@@ -1124,7 +1158,6 @@ app.post(
       });
     }
 
-    // ✅ stock কমাও (size-wise + total)
     for (const item of body.items) {
       const product = productMap.get(String(item.productId));
       const quantity = Number(item.quantity || 1);
@@ -1145,18 +1178,23 @@ app.post(
     );
 
     // ============================================================
-    // ✅ Server-side delivery charge — trusted computation
-    // Priority: product-specific deliveryCharge > global settings > 80
+    // ✅ Zone-aware delivery computation
+    // Priority: product-specific zone charge > global zone charge
     // ============================================================
-    const globalDelivery = await getGlobalDelivery();
+    const zone = detectDeliveryZone(body.city, body.address);
+    const globalCharges = await getGlobalDeliveryCharges();
 
-    const productDeliveryList = products
-      .map((p) => Number(p.deliveryCharge || 0))
+    const productZoneCharges = products
+      .map((p) => {
+        const dc = p.deliveryCharges || {};
+        const val = Number(dc[zone] || 0);
+        return val > 0 ? val : 0;
+      })
       .filter((n) => n > 0);
 
-    const autoDelivery = productDeliveryList.length
-      ? Math.max(...productDeliveryList)
-      : globalDelivery;
+    const autoDelivery = productZoneCharges.length
+      ? Math.max(...productZoneCharges)
+      : globalCharges[zone];
 
     const requestedDelivery = Number(body.deliveryCharge ?? autoDelivery);
     const deliveryCharge = Number.isFinite(requestedDelivery)
@@ -1188,16 +1226,13 @@ app.post(
       items,
       subtotal,
       deliveryCharge,
+      deliveryZone: zone,
       total: subtotal + deliveryCharge,
       paymentMethod: method,
       transactionId: body.transactionId || "",
       paymentScreenshot: body.paymentScreenshot || "",
       paymentStatus: method === "cod" ? "not_required" : "pending_verification",
     });
-
-    // --------------------
-    // Telegram notification (size সহ)
-    // --------------------
 
     const formatMoney = (amount) =>
       `৳${Number(amount || 0).toLocaleString("en-BD")}`;
@@ -1207,6 +1242,12 @@ app.post(
       bkash: "bKash",
       nagad: "Nagad",
       rocket: "Rocket",
+    };
+
+    const zoneLabels = {
+      dhaka: "Inside Dhaka",
+      ashulia: "Near Ashulia",
+      outside: "Outside Dhaka",
     };
 
     const itemList = items
@@ -1245,6 +1286,7 @@ app.post(
       "🧾 ORDER INFORMATION",
       `Order ID: ${orderNumber}`,
       `Order Status: ${(order.status || "pending").toUpperCase()}`,
+      `Delivery Zone: ${zoneLabels[zone] || zone}`,
       "",
       "👤 CUSTOMER DETAILS",
       `Name: ${order.customerName}`,
@@ -1263,7 +1305,7 @@ app.post(
       "",
       "━━━━━━━━━━━━━━━━━━━━",
       `Subtotal: ${formatMoney(order.subtotal)}`,
-      `Delivery Charge: ${formatMoney(order.deliveryCharge)}`,
+      `Delivery Charge (${zoneLabels[zone] || zone}): ${formatMoney(order.deliveryCharge)}`,
       `💰 TOTAL PAYABLE: ${formatMoney(order.total)}`,
       "━━━━━━━━━━━━━━━━━━━━",
       "",
@@ -1277,7 +1319,6 @@ app.post(
       console.error("Telegram notification failed:", error.message);
     }
 
-    // ✅ SSE emit — notify all connected admins about the new order
     try {
       orderEvents.emit("new-order", {
         _id: order._id,
@@ -1290,6 +1331,7 @@ app.post(
         status: order.status,
         paymentStatus: order.paymentStatus,
         paymentMethod: order.paymentMethod,
+        deliveryZone: order.deliveryZone,
         createdAt: order.createdAt,
         items: order.items,
       });
@@ -1301,6 +1343,7 @@ app.post(
       orderNumber,
       status: order.status,
       total: order.total,
+      deliveryZone: order.deliveryZone,
     });
   }),
 );
@@ -1356,7 +1399,6 @@ app.get(
 // Admin order management
 // --------------------
 
-// ✅ New orders only (pending status) — MUST be before /api/admin/orders/:id
 app.get(
   "/api/admin/orders/new",
   admin,
@@ -1375,7 +1417,6 @@ app.get(
   admin,
   wrap(async (_req, res) => {
     const orders = await Order.find().sort({ createdAt: -1 }).limit(500).lean();
-
     res.json(orders);
   }),
 );
@@ -1385,9 +1426,7 @@ app.patch(
   admin,
   wrap(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        message: "Invalid order ID.",
-      });
+      return res.status(400).json({ message: "Invalid order ID." });
     }
 
     const update = {};
@@ -1428,12 +1467,9 @@ app.patch(
     });
 
     if (!order) {
-      return res.status(404).json({
-        message: "Order not found.",
-      });
+      return res.status(404).json({ message: "Order not found." });
     }
 
-    // ✅ SSE emit — notify all connected admins about the order update
     try {
       orderEvents.emit("order-updated", {
         _id: order._id,
@@ -1450,32 +1486,28 @@ app.patch(
 );
 
 // ============================================================
-// ✅ Admin — Delivery Charge Override
+// Admin — Delivery Charge Override
 // ============================================================
 app.patch(
   "/api/admin/orders/:id/delivery-charge",
   admin,
   wrap(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        message: "Invalid order ID.",
-      });
+      return res.status(400).json({ message: "Invalid order ID." });
     }
 
     const newCharge = Number(req.body.deliveryCharge);
 
     if (!Number.isFinite(newCharge) || newCharge < 0) {
-      return res.status(400).json({
-        message: "Valid delivery charge required.",
-      });
+      return res
+        .status(400)
+        .json({ message: "Valid delivery charge required." });
     }
 
     const order = await Order.findById(req.params.id);
 
     if (!order) {
-      return res.status(404).json({
-        message: "Order not found.",
-      });
+      return res.status(404).json({ message: "Order not found." });
     }
 
     order.deliveryCharge = newCharge;
@@ -1508,27 +1540,22 @@ app.patch(
 );
 
 // ============================================================
-// ✅ NEW: Admin — Delete an order (permanent)
+// Admin — Delete an order (permanent)
 // ============================================================
 app.delete(
   "/api/admin/orders/:id",
   admin,
   wrap(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({
-        message: "Invalid order ID.",
-      });
+      return res.status(400).json({ message: "Invalid order ID." });
     }
 
     const order = await Order.findByIdAndDelete(req.params.id);
 
     if (!order) {
-      return res.status(404).json({
-        message: "Order not found.",
-      });
+      return res.status(404).json({ message: "Order not found." });
     }
 
-    // ✅ SSE emit — notify all connected admins about the deletion
     try {
       orderEvents.emit("order-updated", {
         _id: order._id,
@@ -1549,7 +1576,7 @@ app.delete(
 );
 
 // ============================================================
-// ✅ Admin — Reports (profit / loss / waste / summary)
+// Admin — Reports
 // ============================================================
 app.get(
   "/api/admin/reports",
@@ -1672,7 +1699,7 @@ app.get(
 );
 
 // ============================================================
-// ✅ Admin — CSV Export
+// Admin — CSV Export
 // ============================================================
 app.get(
   "/api/admin/reports/export",
@@ -1692,6 +1719,7 @@ app.get(
       "Order Number",
       "Order Date",
       "Status",
+      "Delivery Zone",
       "Payment Status",
       "Payment Method",
       "Customer Name",
@@ -1730,6 +1758,7 @@ app.get(
             order.orderNumber,
             order.createdAt ? new Date(order.createdAt).toISOString() : "",
             order.status,
+            order.deliveryZone || "",
             order.paymentStatus,
             order.paymentMethod,
             order.customerName,
@@ -1783,9 +1812,7 @@ app.use((req, res) => {
 app.use((error, _req, res, _next) => {
   console.error(error);
 
-  if (res.headersSent) {
-    return;
-  }
+  if (res.headersSent) return;
 
   const status =
     Number.isInteger(error.status) && error.status >= 400 && error.status < 600
