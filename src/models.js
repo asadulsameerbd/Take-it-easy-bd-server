@@ -19,7 +19,10 @@ const userSchema = new mongoose.Schema(
 const productSchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
-    slug: { type: String, required: true, unique: true },
+
+    // ✅ FIXED: unique সরানো — একই নামে একাধিক product allow
+    slug: { type: String, required: true },
+
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
     cost: { type: Number, default: 0, min: 0 },
@@ -55,6 +58,9 @@ const productSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// ✅ Non-unique index — slug দিয়ে fast lookup, কিন্তু duplicate allow
+productSchema.index({ slug: 1 });
 
 const reviewSchema = new mongoose.Schema(
   {

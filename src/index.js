@@ -57,6 +57,7 @@ app.use((req, res, next) => {
 
 let connectionPromise = null;
 let seedPromise = null;
+let indexFixPromise = null;
 
 async function connectDatabase() {
   if (mongoose.connection.readyState === 1) return;
@@ -90,8 +91,55 @@ async function connectDatabase() {
   await connectionPromise;
 }
 
+/**
+ * ✅ FIXED: পুরনো unique slug index automatically drop করে
+ * এতে database manually repair না করলেও duplicate slug insert কাজ করবে
+ */
+async function fixProductIndexes() {
+  if (indexFixPromise) {
+    await indexFixPromise;
+    return;
+  }
+
+  indexFixPromise = (async () => {
+    try {
+      const collection = mongoose.connection.collection("products");
+      const indexes = await collection.indexes();
+
+      for (const idx of indexes) {
+        const isSlugIndex =
+          idx.key && idx.key.slug === 1 && Object.keys(idx.key).length === 1;
+
+        if (isSlugIndex && idx.unique) {
+          console.log(
+            `[index-fix] Dropping old unique slug index: ${idx.name}`,
+          );
+          await collection.dropIndex(idx.name);
+          console.log(`[index-fix] Dropped: ${idx.name}`);
+        }
+      }
+
+      // Non-unique index নিশ্চিত করুন
+      try {
+        await collection.createIndex({ slug: 1 }, { unique: false });
+        console.log("[index-fix] Non-unique slug index ensured.");
+      } catch (err) {
+        // Index already exists with different options — ignore
+        if (!/already exists/i.test(err.message)) {
+          console.warn("[index-fix] createIndex warning:", err.message);
+        }
+      }
+    } catch (err) {
+      console.error("[index-fix] error:", err.message);
+    }
+  })();
+
+  await indexFixPromise;
+}
+
 async function initializeDatabase() {
   await connectDatabase();
+  await fixProductIndexes();
 
   if (!seedPromise) {
     seedPromise = Promise.resolve()
@@ -176,6 +224,17 @@ const clean = (user) => ({
 });
 
 /**
+ * ✅ Unique slug generator — একই নামে multiple product allow করে
+ * Format: <slugified-title>-<timestamp>-<random>
+ */
+function generateUniqueSlug(title) {
+  const base = slugify(title) || "product";
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).slice(2, 8);
+  return `${base}-${timestamp}-${random}`;
+}
+
+/**
  * ✅ Map → plain object (safe)
  */
 const normalizeSizeStock = (raw) => {
@@ -207,11 +266,7 @@ const sumSizeStock = (sizeStock) =>
   Object.values(sizeStock).reduce((a, b) => a + Number(b || 0), 0);
 
 /**
- * ✅ FIXED: Product → safe plain object for JSON response
- * - Mongoose Map ঠিকভাবে serialize করে
- * - সব numeric field numeric coercion করে
- * - সব array field নিশ্চিত করে
- * - কোনো error হলে fallback
+ * ✅ Product → safe plain object for JSON response
  */
 const serializeProduct = (p) => {
   if (!p) return null;
@@ -571,7 +626,7 @@ app.get(
 );
 
 // --------------------
-// Public products — ✅ FIXED: Map-safe serialization
+// Public products — ✅ Map-safe serialization
 // --------------------
 
 app.get(
@@ -614,7 +669,7 @@ app.get(
 );
 
 // --------------------
-// Product details — ✅ FIXED: Map-safe serialization
+// Product details
 // --------------------
 
 app.get(
@@ -630,7 +685,9 @@ app.get(
       const product = await Product.findOne({
         $or: conditions,
         active: true,
-      }).lean();
+      })
+        .sort({ createdAt: -1 })
+        .lean();
 
       if (!product) {
         return res.status(404).json({ message: "Product not found." });
@@ -844,7 +901,7 @@ app.patch(
 );
 
 // --------------------
-// Admin product management — ✅ FIXED: Map-safe serialization
+// Admin product management
 // --------------------
 
 app.get(
@@ -869,7 +926,7 @@ app.get(
   }),
 );
 
-// ✅ POST — ২টা zone delivery charges
+// ✅ POST — duplicate title allow, unique slug always
 app.post(
   "/api/admin/products",
   admin,
@@ -900,37 +957,51 @@ app.post(
       outside: Math.max(0, Number(dc.outside || 0)),
     };
 
-    const product = await Product.create({
-      title: body.title.trim(),
-      slug: `${slugify(body.title)}-${Date.now().toString(36)}`,
-      description: body.description || "",
-      price,
-      cost: Math.max(0, Number(body.cost || 0)),
-      compareAtPrice: Number(body.compareAtPrice || 0),
-      discountPercent: Math.max(
-        0,
-        Math.min(90, Number(body.discountPercent || 0)),
-      ),
-      deliveryCharges,
-      deliveryCharge: 0,
-      category: body.category || "Clothing",
-      images: Array.isArray(body.images) ? body.images : [],
-      sizes,
-      sizeStock,
-      colors: Array.isArray(body.colors) ? body.colors : [],
-      stock: totalStock,
-      sku: body.sku || "",
-      material: body.material || "",
-      gsm: body.gsm || "",
-      tags: Array.isArray(body.tags) ? body.tags : [],
-      active: body.active !== false,
-    });
+    try {
+      const product = await Product.create({
+        title: body.title.trim(),
+        // ✅ Unique slug — duplicate title allow
+        slug: generateUniqueSlug(body.title),
+        description: body.description || "",
+        price,
+        cost: Math.max(0, Number(body.cost || 0)),
+        compareAtPrice: Number(body.compareAtPrice || 0),
+        discountPercent: Math.max(
+          0,
+          Math.min(90, Number(body.discountPercent || 0)),
+        ),
+        deliveryCharges,
+        deliveryCharge: 0,
+        category: body.category || "Clothing",
+        images: Array.isArray(body.images) ? body.images : [],
+        sizes,
+        sizeStock,
+        colors: Array.isArray(body.colors) ? body.colors : [],
+        stock: totalStock,
+        sku: body.sku || "",
+        material: body.material || "",
+        gsm: body.gsm || "",
+        tags: Array.isArray(body.tags) ? body.tags : [],
+        active: body.active !== false,
+      });
 
-    res.status(201).json(serializeProduct(product));
+      res.status(201).json(serializeProduct(product));
+    } catch (err) {
+      // ✅ Duplicate key error ধরা
+      if (err.code === 11000) {
+        console.error("[POST product] Duplicate key:", err.message);
+        return res.status(409).json({
+          message:
+            "A duplicate key error occurred. Please try again with a different title or contact support.",
+          error: err.message,
+        });
+      }
+      throw err;
+    }
   }),
 );
 
-// ✅ PATCH — ২টা zone delivery charges
+// ✅ PATCH — unique slug regenerate
 app.patch(
   "/api/admin/products/:id",
   admin,
@@ -1017,7 +1088,8 @@ app.patch(
 
     if (update.title?.trim()) {
       update.title = update.title.trim();
-      update.slug = `${slugify(update.title)}-${Date.now().toString(36)}`;
+      // ✅ Unique slug
+      update.slug = generateUniqueSlug(update.title);
     }
 
     const nextSizes =
@@ -1040,12 +1112,22 @@ app.patch(
       update.stock = Math.max(0, Number(req.body.stock || 0));
     }
 
-    const product = await Product.findByIdAndUpdate(req.params.id, update, {
-      new: true,
-      runValidators: true,
-    }).lean();
+    try {
+      const product = await Product.findByIdAndUpdate(req.params.id, update, {
+        new: true,
+        runValidators: true,
+      }).lean();
 
-    res.json(serializeProduct(product));
+      res.json(serializeProduct(product));
+    } catch (err) {
+      if (err.code === 11000) {
+        return res.status(409).json({
+          message: "Duplicate key error. Please try again.",
+          error: err.message,
+        });
+      }
+      throw err;
+    }
   }),
 );
 
@@ -1245,16 +1327,24 @@ app.post(
       });
     }
 
-    // ✅ Stock update with Map
+    // ✅ Stock update — Map বা Object দুই ক্ষেত্রেই কাজ করবে
     for (const item of body.items) {
       const product = productMap.get(String(item.productId));
       const quantity = Number(item.quantity || 1);
       const size = String(item.size || "");
 
-      if (size && product.sizeStock instanceof Map) {
-        const available = Number(product.sizeStock.get(size) || 0);
-        if (product.sizeStock.get(size) !== undefined) {
-          product.sizeStock.set(size, Math.max(0, available - quantity));
+      if (size && product.sizeStock) {
+        if (product.sizeStock instanceof Map) {
+          const available = Number(product.sizeStock.get(size) || 0);
+          if (product.sizeStock.get(size) !== undefined) {
+            product.sizeStock.set(size, Math.max(0, available - quantity));
+          }
+        } else if (typeof product.sizeStock === "object") {
+          const available = Number(product.sizeStock[size] || 0);
+          if (product.sizeStock[size] !== undefined) {
+            product.sizeStock[size] = Math.max(0, available - quantity);
+            product.markModified("sizeStock");
+          }
         }
       }
 
@@ -1267,9 +1357,6 @@ app.post(
       0,
     );
 
-    // ============================================================
-    // ✅ ২টা zone delivery — customer choice অথবা city থেকে detect
-    // ============================================================
     const bodyZone = String(body.deliveryZone || "").trim();
     const zone = VALID_ZONES.includes(bodyZone)
       ? bodyZone
