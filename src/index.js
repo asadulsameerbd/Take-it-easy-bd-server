@@ -175,10 +175,23 @@ const clean = (user) => ({
   phone: user.phone,
 });
 
+/**
+ * ✅ Map → plain object (safe)
+ */
 const normalizeSizeStock = (raw) => {
   if (!raw) return {};
-  if (raw instanceof Map) return Object.fromEntries(raw);
-  if (typeof raw === "object") return raw;
+  try {
+    if (raw instanceof Map) return Object.fromEntries(raw);
+    if (typeof raw === "object") {
+      const out = {};
+      for (const key of Object.keys(raw)) {
+        out[String(key)] = raw[key];
+      }
+      return out;
+    }
+  } catch (e) {
+    console.error("[normalizeSizeStock] failed:", e.message);
+  }
   return {};
 };
 
@@ -192,6 +205,64 @@ const buildSizeStock = (sizes, rawSizeStock) => {
 
 const sumSizeStock = (sizeStock) =>
   Object.values(sizeStock).reduce((a, b) => a + Number(b || 0), 0);
+
+/**
+ * ✅ FIXED: Product → safe plain object for JSON response
+ * - Mongoose Map ঠিকভাবে serialize করে
+ * - সব numeric field numeric coercion করে
+ * - সব array field নিশ্চিত করে
+ * - কোনো error হলে fallback
+ */
+const serializeProduct = (p) => {
+  if (!p) return null;
+
+  let sizeStockObj = {};
+  try {
+    if (p.sizeStock) {
+      if (p.sizeStock instanceof Map) {
+        sizeStockObj = Object.fromEntries(p.sizeStock);
+      } else if (typeof p.sizeStock === "object") {
+        sizeStockObj = {};
+        for (const key of Object.keys(p.sizeStock)) {
+          sizeStockObj[String(key)] = p.sizeStock[key];
+        }
+      }
+    }
+  } catch (err) {
+    console.error(
+      `[serializeProduct] sizeStock failed for ${p._id}:`,
+      err.message,
+    );
+    sizeStockObj = {};
+  }
+
+  const cleanSizeStock = {};
+  for (const [k, v] of Object.entries(sizeStockObj)) {
+    cleanSizeStock[String(k)] = Math.max(0, Number(v) || 0);
+  }
+
+  const dc = p.deliveryCharges || {};
+
+  return {
+    ...p,
+    price: Number(p.price || 0),
+    cost: Number(p.cost || 0),
+    compareAtPrice: Number(p.compareAtPrice || 0),
+    discountPercent: Number(p.discountPercent || 0),
+    stock: Number(p.stock || 0),
+    sizeStock: cleanSizeStock,
+    deliveryCharges: {
+      dhaka: Math.max(0, Number(dc.dhaka ?? 0)),
+      outside: Math.max(0, Number(dc.outside ?? 0)),
+    },
+    deliveryCharge: Math.max(0, Number(p.deliveryCharge || 0)),
+    images: Array.isArray(p.images) ? p.images : [],
+    sizes: Array.isArray(p.sizes) ? p.sizes : [],
+    colors: Array.isArray(p.colors) ? p.colors : [],
+    tags: Array.isArray(p.tags) ? p.tags : [],
+    active: p.active !== false,
+  };
+};
 
 const buildReportFilter = (query) => {
   const filter = {};
@@ -500,59 +571,85 @@ app.get(
 );
 
 // --------------------
-// Public products
+// Public products — ✅ FIXED: Map-safe serialization
 // --------------------
 
 app.get(
   "/api/products",
   wrap(async (req, res) => {
-    const filter = { active: true };
-    const query = String(req.query.q || "").trim();
+    try {
+      const filter = { active: true };
+      const query = String(req.query.q || "").trim();
 
-    if (query) {
-      const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      filter.$or = [
-        { title: { $regex: safeQuery, $options: "i" } },
-        { description: { $regex: safeQuery, $options: "i" } },
-      ];
+      if (query) {
+        const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        filter.$or = [
+          { title: { $regex: safeQuery, $options: "i" } },
+          { description: { $regex: safeQuery, $options: "i" } },
+        ];
+      }
+
+      if (req.query.category && req.query.category !== "All") {
+        filter.category = String(req.query.category);
+      }
+
+      const products = await Product.find(filter)
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .lean();
+
+      const safeProducts = products.map(serializeProduct);
+
+      console.log(`[GET /api/products] found=${safeProducts.length}`);
+
+      res.json(safeProducts);
+    } catch (err) {
+      console.error("[GET /api/products] error:", err);
+      res.status(500).json({
+        message: "Failed to load products.",
+        error: err.message,
+      });
     }
-
-    if (req.query.category && req.query.category !== "All") {
-      filter.category = String(req.query.category);
-    }
-
-    const products = await Product.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .lean();
-
-    res.json(products);
   }),
 );
+
+// --------------------
+// Product details — ✅ FIXED: Map-safe serialization
+// --------------------
 
 app.get(
   "/api/products/:slug",
   wrap(async (req, res) => {
-    const conditions = [{ slug: req.params.slug }];
+    try {
+      const conditions = [{ slug: req.params.slug }];
 
-    if (mongoose.isValidObjectId(req.params.slug)) {
-      conditions.push({ _id: req.params.slug });
+      if (mongoose.isValidObjectId(req.params.slug)) {
+        conditions.push({ _id: req.params.slug });
+      }
+
+      const product = await Product.findOne({
+        $or: conditions,
+        active: true,
+      }).lean();
+
+      if (!product) {
+        return res.status(404).json({ message: "Product not found." });
+      }
+
+      const safeProduct = serializeProduct(product);
+
+      const reviews = await Review.find({ product: product._id })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      res.json({ product: safeProduct, reviews });
+    } catch (err) {
+      console.error("[GET /api/products/:slug] error:", err);
+      res.status(500).json({
+        message: "Failed to load product.",
+        error: err.message,
+      });
     }
-
-    const product = await Product.findOne({
-      $or: conditions,
-      active: true,
-    }).lean();
-
-    if (!product) {
-      return res.status(404).json({ message: "Product not found." });
-    }
-
-    const reviews = await Review.find({ product: product._id })
-      .sort({ createdAt: -1 })
-      .lean();
-
-    res.json({ product, reviews });
   }),
 );
 
@@ -747,15 +844,28 @@ app.patch(
 );
 
 // --------------------
-// Admin product management
+// Admin product management — ✅ FIXED: Map-safe serialization
 // --------------------
 
 app.get(
   "/api/admin/products",
   admin,
   wrap(async (_req, res) => {
-    const products = await Product.find().sort({ createdAt: -1 }).lean();
-    res.json(products);
+    try {
+      const products = await Product.find().sort({ createdAt: -1 }).lean();
+
+      const safeProducts = products.map(serializeProduct);
+
+      console.log(`[GET /api/admin/products] found=${safeProducts.length}`);
+
+      res.json(safeProducts);
+    } catch (err) {
+      console.error("[GET /api/admin/products] error:", err);
+      res.status(500).json({
+        message: "Failed to load products.",
+        error: err.message,
+      });
+    }
   }),
 );
 
@@ -813,10 +923,10 @@ app.post(
       material: body.material || "",
       gsm: body.gsm || "",
       tags: Array.isArray(body.tags) ? body.tags : [],
-      active: true,
+      active: body.active !== false,
     });
 
-    res.status(201).json(product);
+    res.status(201).json(serializeProduct(product));
   }),
 );
 
@@ -933,9 +1043,9 @@ app.patch(
     const product = await Product.findByIdAndUpdate(req.params.id, update, {
       new: true,
       runValidators: true,
-    });
+    }).lean();
 
-    res.json(product);
+    res.json(serializeProduct(product));
   }),
 );
 
@@ -1110,8 +1220,10 @@ app.post(
 
       const size = String(item.size || "");
 
-      if (size && product.sizeStock?.get(size) !== undefined) {
-        const available = product.sizeStock.get(size) || 0;
+      const sizeStockObj = normalizeSizeStock(product.sizeStock);
+
+      if (size && sizeStockObj[size] !== undefined) {
+        const available = Number(sizeStockObj[size] || 0);
         if (available < quantity) {
           return res.status(400).json({
             message: `${product.title} (Size: ${size}) — only ${available} left in stock.`,
@@ -1133,14 +1245,17 @@ app.post(
       });
     }
 
+    // ✅ Stock update with Map
     for (const item of body.items) {
       const product = productMap.get(String(item.productId));
       const quantity = Number(item.quantity || 1);
       const size = String(item.size || "");
 
-      if (size && product.sizeStock?.get(size) !== undefined) {
-        const available = product.sizeStock.get(size) || 0;
-        product.sizeStock.set(size, Math.max(0, available - quantity));
+      if (size && product.sizeStock instanceof Map) {
+        const available = Number(product.sizeStock.get(size) || 0);
+        if (product.sizeStock.get(size) !== undefined) {
+          product.sizeStock.set(size, Math.max(0, available - quantity));
+        }
       }
 
       product.stock = Math.max(0, Number(product.stock || 0) - quantity);
@@ -1154,7 +1269,6 @@ app.post(
 
     // ============================================================
     // ✅ ২টা zone delivery — customer choice অথবা city থেকে detect
-    // Priority: product zone charge > global zone charge
     // ============================================================
     const bodyZone = String(body.deliveryZone || "").trim();
     const zone = VALID_ZONES.includes(bodyZone)
@@ -1785,7 +1899,7 @@ app.use((req, res) => {
 // --------------------
 
 app.use((error, _req, res, _next) => {
-  console.error(error);
+  console.error("[global error handler]", error);
 
   if (res.headersSent) return;
 
@@ -1796,6 +1910,7 @@ app.use((error, _req, res, _next) => {
 
   res.status(status).json({
     message: status === 500 ? "Internal server error." : error.message,
+    error: status === 500 ? error.message : undefined,
   });
 });
 
