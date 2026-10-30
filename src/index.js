@@ -589,31 +589,70 @@ app.patch(
 app.post(
   "/api/admin/login",
   wrap(async (req, res) => {
-    const email = String(req.body.email || "")
+    const email = String(req.body?.email || "")
       .trim()
       .toLowerCase();
+
+    const password = String(req.body?.password || "");
+
     const adminEmail = String(process.env.ADMIN_EMAIL || "")
       .trim()
       .toLowerCase();
-    const adminPassword = process.env.ADMIN_PASSWORD;
-    const jwtSecret = process.env.JWT_SECRET;
 
+    const adminPassword = String(process.env.ADMIN_PASSWORD || "");
+    const jwtSecret = String(process.env.JWT_SECRET || "");
+
+    // Check environment configuration
     if (!adminEmail || !adminPassword || !jwtSecret) {
-      console.error("Admin login environment variables are missing.");
-      return res
-        .status(500)
-        .json({ message: "Admin login is not configured." });
+      console.error("[ADMIN LOGIN] Missing environment variables.");
+
+      return res.status(500).json({
+        success: false,
+        message: "Admin login is not configured.",
+      });
     }
 
-    if (email !== adminEmail || req.body.password !== adminPassword) {
-      return res.status(401).json({ message: "Invalid admin credentials." });
+    // Validate request
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required.",
+      });
     }
 
-    const token = jwt.sign({ role: "admin" }, jwtSecret, { expiresIn: "12h" });
-    res.json({ token });
+    // Validate credentials
+    if (email !== adminEmail || password !== adminPassword) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid admin email or password.",
+      });
+    }
+
+    // Generate admin token
+    const token = jwt.sign(
+      {
+        sub: "store-admin",
+        role: "admin",
+      },
+      jwtSecret,
+      {
+        expiresIn: "12h",
+      },
+    );
+
+    console.log("[ADMIN LOGIN] Successful login.");
+
+    return res.json({
+      success: true,
+      message: "Admin login successful.",
+      token,
+      user: {
+        role: "admin",
+        email: adminEmail,
+      },
+    });
   }),
 );
-
 // ============================================================
 // ✅ Public — global delivery charges (২টা zone)
 // ============================================================

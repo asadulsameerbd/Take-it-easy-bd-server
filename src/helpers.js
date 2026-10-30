@@ -1,9 +1,10 @@
 import jwt from "jsonwebtoken";
 import { v2 as cloudinary } from "cloudinary";
 
-/* ============================================================ */
-/* Cloudinary configuration                                     */
-/* ============================================================ */
+// ============================================================
+// Cloudinary configuration
+// ============================================================
+
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -11,52 +12,103 @@ cloudinary.config({
   secure: true,
 });
 
-/* ============================================================ */
-/* JWT helpers                                                  */
-/* ============================================================ */
+// ============================================================
+// JWT configuration
+// ============================================================
+
+const getJwtSecret = () => {
+  const secret = process.env.JWT_SECRET;
+
+  if (!secret) {
+    throw new Error("JWT_SECRET is missing from server environment.");
+  }
+
+  return secret;
+};
+
+// Customer token
 export const tokenFor = (user) =>
   jwt.sign(
-    { sub: String(user._id), role: "customer" },
-    process.env.JWT_SECRET,
+    {
+      sub: String(user._id),
+      role: "customer",
+    },
+    getJwtSecret(),
     { expiresIn: "7d" },
   );
 
+// Extract Bearer token
+const getBearerToken = (req) => {
+  const authorization = req.headers.authorization || "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  return match ? match[1].trim() : null;
+};
+
+// ============================================================
+// Customer authentication
+// ============================================================
+
 export function auth(req, res, next) {
   try {
-    const t = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    const token = getBearerToken(req);
 
-    const d = jwt.verify(t, process.env.JWT_SECRET);
+    if (!token) {
+      return res.status(401).json({
+        message: "Please log in first.",
+      });
+    }
 
-    if (d.role !== "customer") throw new Error();
+    const decoded = jwt.verify(token, getJwtSecret());
 
-    req.userId = d.sub;
+    if (decoded.role !== "customer" || !decoded.sub) {
+      throw new Error("Invalid customer token.");
+    }
+
+    req.userId = decoded.sub;
+
     next();
-  } catch {
+  } catch (error) {
     return res.status(401).json({
       message: "Please log in first.",
     });
   }
 }
 
+// ============================================================
+// Admin authentication
+// ============================================================
+
 export function admin(req, res, next) {
   try {
-    const t = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    const token = getBearerToken(req);
 
-    if (jwt.verify(t, process.env.JWT_SECRET).role !== "admin") {
-      throw new Error();
+    if (!token) {
+      return res.status(401).json({
+        message: "Admin login required.",
+      });
     }
 
+    const decoded = jwt.verify(token, getJwtSecret());
+
+    if (decoded.role !== "admin") {
+      throw new Error("Invalid admin token.");
+    }
+
+    req.adminId = decoded.sub || "store-admin";
+
     next();
-  } catch {
+  } catch (error) {
     return res.status(401).json({
       message: "Admin login required.",
     });
   }
 }
 
-/* ============================================================ */
-/* Slug helper                                                  */
-/* ============================================================ */
+// ============================================================
+// Slug helper
+// ============================================================
+
 export const slugify = (s) =>
   String(s || "product")
     .toLowerCase()
@@ -64,9 +116,10 @@ export const slugify = (s) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "") || `product-${Date.now()}`;
 
-/* ============================================================ */
-/* Cloudinary Upload — Buffer/Stream based (ENAMETOOLONG fix)   */
-/* ============================================================ */
+// ============================================================
+// Cloudinary Upload
+// ============================================================
+
 export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
   if (!dataUrl) {
     throw new Error("Image is required.");
@@ -77,17 +130,15 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
     !process.env.CLOUDINARY_API_KEY ||
     !process.env.CLOUDINARY_API_SECRET
   ) {
-    throw new Error(
-      "Cloudinary credentials missing in server .env (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET)",
-    );
+    throw new Error("Cloudinary credentials are missing.");
   }
 
   try {
     let buffer;
 
-    // Handle data URL, raw base64 string, or Buffer
     if (typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
       const base64Data = dataUrl.replace(/^data:[^;]+;base64,/, "");
+
       buffer = Buffer.from(base64Data, "base64");
     } else if (typeof dataUrl === "string") {
       buffer = Buffer.from(dataUrl, "base64");
@@ -97,21 +148,28 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
       throw new Error("Invalid image data format.");
     }
 
-    if (!buffer || buffer.length === 0) {
+    if (!buffer.length) {
       throw new Error("Empty image data.");
     }
 
-    // Use upload_stream to avoid ENAMETOOLONG
     const result = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         {
           folder,
           resource_type: "image",
-          transformation: [{ quality: "auto:good", fetch_format: "auto" }],
+          transformation: [
+            {
+              quality: "auto:good",
+              fetch_format: "auto",
+            },
+          ],
         },
         (error, uploadResult) => {
-          if (error) return reject(error);
-          return resolve(uploadResult);
+          if (error) {
+            return reject(error);
+          }
+
+          resolve(uploadResult);
         },
       );
 
@@ -120,32 +178,25 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
 
     return result.secure_url;
   } catch (error) {
-    console.error("Cloudinary upload error:", {
-      message: error?.message,
-      http_code: error?.http_code,
-    });
-    throw new Error(
-      error?.message || "Cloudinary upload failed. Please try again.",
-    );
+    console.error("Cloudinary upload error:", error.message);
+
+    throw new Error(error.message || "Cloudinary upload failed.");
   }
 }
 
-// Backward compat — old imgBB() calls still work
+// Backward compatibility
 export const imgBB = uploadToCloudinary;
 
-/* ============================================================ */
-/* Telegram notification                                        */
-/* ============================================================ */
+// ============================================================
+// Telegram notification
+// ============================================================
+
 export async function telegram(message) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
-  if (!token) {
-    throw new Error("TELEGRAM_BOT_TOKEN is missing in server .env");
-  }
-
-  if (!chatId) {
-    throw new Error("TELEGRAM_CHAT_ID is missing in server .env");
+  if (!token || !chatId) {
+    throw new Error("Telegram bot token or chat ID is missing.");
   }
 
   const response = await fetch(
@@ -166,11 +217,11 @@ export async function telegram(message) {
 
   if (!response.ok || !result.ok) {
     throw new Error(
-      result.description ||
-        `Telegram API failed with status ${response.status}`,
+      result.description || `Telegram API failed: ${response.status}`,
     );
   }
 
   console.log("Telegram notification sent successfully.");
+
   return result;
 }
