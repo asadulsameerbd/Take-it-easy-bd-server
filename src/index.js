@@ -9,6 +9,7 @@ import { EventEmitter } from "events";
 import { User, Product, Review, Order, Banner, Settings } from "./models.js";
 import {
   tokenFor,
+  tokenForAdmin, // ✅ নতুন যোগ করুন
   auth,
   admin,
   slugify,
@@ -629,16 +630,8 @@ app.post(
     }
 
     // Generate admin token
-    const token = jwt.sign(
-      {
-        sub: "store-admin",
-        role: "admin",
-      },
-      jwtSecret,
-      {
-        expiresIn: "12h",
-      },
-    );
+    // ✅ helpers.js এর tokenForAdmin ব্যবহার করুন
+    const token = tokenForAdmin(email);
 
     console.log("[ADMIN LOGIN] Successful login.");
 
@@ -1366,29 +1359,53 @@ app.post(
       });
     }
 
-    // ✅ Stock update — Map বা Object দুই ক্ষেত্রেই কাজ করবে
+    // ✅ FIXED: Stock update — atomic (race condition fix)
     for (const item of body.items) {
       const product = productMap.get(String(item.productId));
       const quantity = Number(item.quantity || 1);
       const size = String(item.size || "");
 
-      if (size && product.sizeStock) {
-        if (product.sizeStock instanceof Map) {
-          const available = Number(product.sizeStock.get(size) || 0);
-          if (product.sizeStock.get(size) !== undefined) {
-            product.sizeStock.set(size, Math.max(0, available - quantity));
-          }
-        } else if (typeof product.sizeStock === "object") {
-          const available = Number(product.sizeStock[size] || 0);
-          if (product.sizeStock[size] !== undefined) {
-            product.sizeStock[size] = Math.max(0, available - quantity);
-            product.markModified("sizeStock");
-          }
+      const sizeStockObj = normalizeSizeStock(product.sizeStock);
+      const hasSizeStock = size && sizeStockObj[size] !== undefined;
+
+      if (hasSizeStock) {
+        // ✅ Atomic decrement with $gte check
+        const updated = await Product.findOneAndUpdate(
+          {
+            _id: product._id,
+            [`sizeStock.${size}`]: { $gte: quantity },
+          },
+          {
+            $inc: {
+              [`sizeStock.${size}`]: -quantity,
+              stock: -quantity,
+            },
+          },
+          { new: true },
+        );
+
+        if (!updated) {
+          return res.status(400).json({
+            message: `${product.title} (Size: ${size}) স্টক শেষ।`,
+          });
+        }
+      } else {
+        // ✅ Atomic decrement for general stock
+        const updated = await Product.findOneAndUpdate(
+          {
+            _id: product._id,
+            stock: { $gte: quantity },
+          },
+          { $inc: { stock: -quantity } },
+          { new: true },
+        );
+
+        if (!updated) {
+          return res.status(400).json({
+            message: `${product.title} স্টক শেষ।`,
+          });
         }
       }
-
-      product.stock = Math.max(0, Number(product.stock || 0) - quantity);
-      await product.save();
     }
 
     const subtotal = items.reduce(

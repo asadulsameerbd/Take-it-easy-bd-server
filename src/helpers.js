@@ -23,10 +23,19 @@ const getJwtSecret = () => {
     throw new Error("JWT_SECRET is missing from server environment.");
   }
 
+  if (String(secret).length < 32) {
+    throw new Error(
+      `JWT_SECRET is too short (${String(secret).length} chars). Must be at least 32 characters.`,
+    );
+  }
+
   return secret;
 };
 
+// ============================================================
 // Customer token
+// ============================================================
+
 export const tokenFor = (user) =>
   jwt.sign(
     {
@@ -37,11 +46,30 @@ export const tokenFor = (user) =>
     { expiresIn: "7d" },
   );
 
+// ============================================================
+// Admin token generator
+// ============================================================
+
+export const tokenForAdmin = (email = "store-admin") =>
+  jwt.sign(
+    {
+      sub: "store-admin",
+      role: "admin",
+      email: String(email || "")
+        .trim()
+        .toLowerCase(),
+    },
+    getJwtSecret(),
+    { expiresIn: "12h" },
+  );
+
+// ============================================================
 // Extract Bearer token
+// ============================================================
+
 const getBearerToken = (req) => {
   const authorization = req.headers.authorization || "";
   const match = authorization.match(/^Bearer\s+(.+)$/i);
-
   return match ? match[1].trim() : null;
 };
 
@@ -66,7 +94,6 @@ export function auth(req, res, next) {
     }
 
     req.userId = decoded.sub;
-
     next();
   } catch (error) {
     return res.status(401).json({
@@ -96,7 +123,7 @@ export function admin(req, res, next) {
     }
 
     req.adminId = decoded.sub || "store-admin";
-
+    req.adminEmail = decoded.email || "";
     next();
   } catch (error) {
     return res.status(401).json({
@@ -138,7 +165,6 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
 
     if (typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
       const base64Data = dataUrl.replace(/^data:[^;]+;base64,/, "");
-
       buffer = Buffer.from(base64Data, "base64");
     } else if (typeof dataUrl === "string") {
       buffer = Buffer.from(dataUrl, "base64");
@@ -168,7 +194,6 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
           if (error) {
             return reject(error);
           }
-
           resolve(uploadResult);
         },
       );
@@ -179,7 +204,6 @@ export async function uploadToCloudinary(dataUrl, folder = "take-it-easy") {
     return result.secure_url;
   } catch (error) {
     console.error("Cloudinary upload error:", error.message);
-
     throw new Error(error.message || "Cloudinary upload failed.");
   }
 }
@@ -222,6 +246,5 @@ export async function telegram(message) {
   }
 
   console.log("Telegram notification sent successfully.");
-
   return result;
 }
